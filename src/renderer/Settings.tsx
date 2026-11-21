@@ -18,7 +18,7 @@ export function KeyPanel({ snapshot, busy, onKey }: {
       </div>
     </form>
     {!snapshot.protectedStorage && <p className="inline-error">이 환경에서는 키를 안전하게 저장할 수 없습니다.</p>}
-    <p className="privacy"><Icon name="shield" size={17}/><span>키는 운영체제의 보안 저장소로 보호합니다. 전사할 음성과 문장 정리용 텍스트는 OpenAI로 전송되며, 앱은 결과를 디스크에 저장하지 않습니다.</span></p>
+    <p className="privacy"><Icon name="shield" size={17}/><span>키는 운영체제의 보안 저장소로 보호합니다. 전사할 음성과 문장 정리용 텍스트는 OpenAI로 전송합니다. 정리된 문장과 녹음 시각은 이 컴퓨터에 암호화해 보관합니다.</span></p>
   </section>;
 }
 
