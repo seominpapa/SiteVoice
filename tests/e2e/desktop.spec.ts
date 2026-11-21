@@ -48,25 +48,28 @@ test('first run: saves encrypted key, survives app restart, deletes key', async 
   }
 })
 
-test('records with fake device, cleans through mocked OpenAI, shows copy fallback', async ({}, testInfo) => {
+test('records with fake device, offers copy fallback, and keeps results after restart', async ({}, testInfo) => {
   const profile = await mkdtemp(join(tmpdir(), 'voiceinput-electron-'))
   let app: ElectronApplication | undefined
   try {
     app = await launch(profile)
-    const page = await dashboard(app)
+    let page = await dashboard(app)
     await app.evaluate(({ clipboard, systemPreferences }) => {
       Object.defineProperty(clipboard, 'writeText', { configurable: true, value: (text: string) => {
+        if (Reflect.get(globalThis, 'voiceInputMockClipboardDenied')) throw new Error('Clipboard unavailable')
         Reflect.set(globalThis, 'voiceInputMockClipboard', text)
       } })
       // The UI test stays independent of the host microphone privacy decision.
       Object.defineProperty(systemPreferences, 'getMediaAccessStatus', { configurable: true, value: () => 'granted' })
       globalThis.fetch = async input => {
         const path = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).pathname
+        const second = Reflect.get(globalThis, 'voiceInputMockSecondRecording')
+        if (second && path.endsWith('/audio/transcriptions')) return Response.json({ text: '안전 점검을, 안전 점검을 먼저 진행해요.' })
         if (path.endsWith('/audio/transcriptions')) return Response.json({ text: '회의는 화요일, 아니 수요일이고 도면 검토가 필요해요.' })
         if (path.endsWith('/responses')) return Response.json({
           status: 'completed',
           output: [{ type: 'message', role: 'assistant', status: 'completed', content: [
-            { type: 'output_text', text: JSON.stringify({ text: '회의는 수요일이고 도면 검토가 필요해요.' }) }
+            { type: 'output_text', text: JSON.stringify({ text: second ? '안전 점검을 먼저 진행해요.' : '회의는 수요일이고 도면 검토가 필요해요.' }) }
           ] }]
         })
         throw new Error('Unexpected remote request blocked by the test')
@@ -78,11 +81,17 @@ test('records with fake device, cleans through mocked OpenAI, shows copy fallbac
     const getOverlay = () => app!.windows().find(win => win.url().endsWith('#overlay'))
     await expect.poll(() => Boolean(getOverlay())).toBe(true)
     const overlay = getOverlay()!
+    const overlayWindow = await app.browserWindow(overlay)
+    const dashboardWindow = await app.browserWindow(page)
     expect(await overlay.evaluate(() => typeof window.voice.get)).toBe('undefined')
+    expect(await overlay.evaluate(() => typeof window.voice.copyHistory)).toBe('undefined')
+    expect(await overlay.evaluate(() => typeof window.voice.onHistory)).toBe('undefined')
     await page.getByRole('button', { name: '녹음 시작', exact: true }).click()
     await expect(overlay.getByTestId('capture-overlay')).toBeVisible()
     await expect(overlay.getByRole('button', { name: '녹음 종료' })).toBeEnabled()
     await expect.poll(async () => (await page.evaluate(() => window.voice.get())).state.phase).toBe('recording')
+    await expect(overlay.evaluate(() => window.voice.overlayAction('copyResult', 1))).rejects.toThrow(/복사할 문장이 없습니다/)
+    await dashboardWindow.evaluate(window => window.hide())
     await overlay.screenshot({ path: testInfo.outputPath('recording.png') })
     await page.waitForTimeout(1100) // Accumulate a real chunk and level samples from Chromium's fake microphone.
     await overlay.getByRole('button', { name: '녹음 종료' }).click()
@@ -90,12 +99,54 @@ test('records with fake device, cleans through mocked OpenAI, shows copy fallbac
       phase: 'copy', raw: '회의는 화요일, 아니 수요일이고 도면 검토가 필요해요.',
       cleaned: '회의는 수요일이고 도면 검토가 필요해요.'
     })
-    await expect(page.getByRole('heading', { name: '정리한 문장' })).toBeVisible()
-    await page.screenshot({ path: testInfo.outputPath('result.png') })
-    await page.getByRole('button', { name: '정리 결과 복사' }).click()
-    expect(await app.evaluate(() => Reflect.get(globalThis, 'voiceInputMockClipboard'))).toBe('회의는 수요일이고 도면 검토가 필요해요.')
-    await page.getByRole('button', { name: '결과 닫기' }).click()
-    await expect.poll(async () => (await page.evaluate(() => window.voice.get())).state.raw).toBeUndefined()
+    await expect(overlay.getByText('회의는 수요일이고 도면 검토가 필요해요.', { exact: true })).toBeVisible()
+    expect(await dashboardWindow.evaluate(window => window.isVisible())).toBe(false)
+    await expect(page.getByRole('heading', { name: /문장이 됩니다/ })).toBeVisible()
+    expect(await overlayWindow.evaluate(window => window.isVisible())).toBe(true)
+    expect(await overlayWindow.evaluate(window => window.isFocused())).toBe(false)
+    const copy = overlay.getByRole('button', { name: '복사하기', exact: true })
+    await expect(copy).toBeVisible({ timeout: 2000 })
+    await expect(copy).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+    await expect(copy.locator('svg')).toBeVisible()
+    await overlay.screenshot({ path: testInfo.outputPath('result-overlay.png') })
+    await app.evaluate(() => Reflect.set(globalThis, 'voiceInputMockClipboardDenied', true))
+    await copy.click()
+    await expect(overlay.getByRole('status')).toHaveText('결과를 복사할 수 없습니다')
+    expect(await overlayWindow.evaluate(window => window.isVisible())).toBe(true)
+    await app.evaluate(() => Reflect.set(globalThis, 'voiceInputMockClipboardDenied', false))
+    await copy.click()
+    await expect.poll(() => app!.evaluate(() => Reflect.get(globalThis, 'voiceInputMockClipboard'))).toBe('회의는 수요일이고 도면 검토가 필요해요.')
+    await expect.poll(() => overlayWindow.evaluate(window => window.isVisible())).toBe(false)
+    await dashboardWindow.evaluate(window => window.show())
+    await app.evaluate(() => Reflect.set(globalThis, 'voiceInputMockSecondRecording', true))
+    await page.getByRole('button', { name: '녹음 시작', exact: true }).click()
+    await expect(overlay.getByRole('button', { name: '녹음 종료' })).toBeEnabled()
+    await overlay.waitForTimeout(1100)
+    await overlay.getByRole('button', { name: '녹음 종료' }).click()
+    await expect.poll(async () => (await page.evaluate(() => window.voice.get())).history.map(entry => entry.text)).toEqual([
+      '안전 점검을 먼저 진행해요.', '회의는 수요일이고 도면 검토가 필요해요.'
+    ])
+    const showHistory = () => page.getByRole('button', { name: '결과', exact: true }).click()
+    const results = () => page.getByRole('list', { name: '받아쓰기 기록' }).getByRole('listitem')
+    await showHistory()
+    await expect(results()).toHaveCount(2)
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await app.evaluate(({ clipboard }) => {
+      Object.defineProperty(clipboard, 'writeText', { configurable: true, value: (text: string) => {
+        Reflect.set(globalThis, 'voiceInputMockClipboard', text)
+      } })
+    })
+    await showHistory()
+    await expect(results()).toHaveCount(2)
+    await expect(results().first().getByText('안전 점검을 먼저 진행해요.', { exact: true })).toBeVisible()
+    await expect(results().last().getByText('회의는 수요일이고 도면 검토가 필요해요.', { exact: true })).toBeVisible()
+    await expect(results().last().locator('time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/)
+    await expect(page.getByText('회의는 화요일, 아니 수요일이고 도면 검토가 필요해요.', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '결과 닫기' })).toHaveCount(0)
+    await results().last().getByRole('button', { name: '결과 복사' }).click()
+    await expect.poll(() => app!.evaluate(() => Reflect.get(globalThis, 'voiceInputMockClipboard'))).toBe('회의는 수요일이고 도면 검토가 필요해요.')
   } finally {
     await close(app)
     await rm(profile, { recursive: true, force: true })
@@ -187,6 +238,76 @@ test('records a shortcut by pressing keys, cancels capture and restores the plat
     await expect(value()).toHaveAttribute('data-shortcut', defaultKey)
     await save()
     await expect.poll(async () => (await page.evaluate(() => window.voice.get())).settings.shortcut).toBe(defaultKey)
+  } finally {
+    await close(app)
+    await rm(profile, { recursive: true, force: true })
+  }
+})
+
+test('opens the matching macOS permission panes and leaves regular shortcut capture available', async () => {
+  test.skip(process.platform !== 'darwin', 'macOS permission panes')
+  const profile = await mkdtemp(join(tmpdir(), 'sitevoice-permissions-'))
+  let app: ElectronApplication | undefined
+  try {
+    app = await launch(profile)
+    const page = await dashboard(app)
+    await app.evaluate(({ shell }) => {
+      shell.openExternal = async url => { Reflect.set(globalThis, 'sitevoiceLastPermissionPane', url) }
+    })
+    const pane = () => app!.evaluate(() => Reflect.get(globalThis, 'sitevoiceLastPermissionPane'))
+    await page.getByRole('button', { name: '환경 설정', exact: true }).click()
+    await page.getByRole('button', { name: '손쉬운 사용 설정 열기', exact: true }).click()
+    await expect.poll(pane).toBe('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')
+    await page.getByRole('button', { name: '입력 모니터링 설정 열기', exact: true }).click()
+    await expect.poll(pane).toBe('x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent')
+    await page.getByRole('button', { name: '키보드 설정 열기', exact: true }).click()
+    await expect.poll(pane).toBe('x-apple.systempreferences:com.apple.Keyboard-Settings.extension')
+    const win = await app.browserWindow(page)
+    await win.evaluate(window => window.focus())
+    await page.getByRole('button', { name: '단축키 입력', exact: true }).click()
+    await page.keyboard.press('Control+Alt+F9')
+    await expect(page.locator('output[data-shortcut]')).toHaveAttribute('data-shortcut', 'Control+Alt+F9')
+  } finally {
+    await close(app)
+    await rm(profile, { recursive: true, force: true })
+  }
+})
+
+test('saves a glossary term and its meaning, including edits after restart', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'sitevoice-glossary-'))
+  let app: ElectronApplication | undefined
+  try {
+    app = await launch(profile)
+    let page = await dashboard(app)
+    const openSettings = () => page.getByRole('button', { name: '환경 설정', exact: true }).click()
+    const glossary = () => page.getByRole('region', { name: '개인 용어 사전' })
+    const save = async () => {
+      await page.getByRole('button', { name: '환경 설정 저장' }).click()
+      await expect(page.getByText('환경 설정을 저장했습니다.')).toBeVisible()
+    }
+    await openSettings()
+    await glossary().getByRole('textbox', { name: '새 용어', exact: true }).fill('숏크리트')
+    await glossary().getByRole('textbox', { name: '뜻·사용 맥락 (선택)', exact: true }).fill('터널 벽면에 뿜어 붙이는 콘크리트')
+    await glossary().getByRole('button', { name: '용어 추가' }).click()
+    await save()
+
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await openSettings()
+    await expect(glossary().getByRole('textbox', { name: '등록 용어 1', exact: true })).toHaveValue('숏크리트')
+    const registeredMeaning = () => glossary().getByRole('textbox', { name: '등록 용어 1의 뜻·사용 맥락', exact: true })
+    await expect(registeredMeaning()).toHaveValue('터널 벽면에 뿜어 붙이는 콘크리트')
+    await registeredMeaning().fill('터널 굴착면이나 사면에 뿜어 붙이는 콘크리트')
+    await save()
+    expect((await page.evaluate(() => window.voice.get())).settings.terms).toEqual([
+      { term: '숏크리트', meaning: '터널 굴착면이나 사면에 뿜어 붙이는 콘크리트' },
+    ])
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await openSettings()
+    await expect(registeredMeaning()).toHaveValue('터널 굴착면이나 사면에 뿜어 붙이는 콘크리트')
   } finally {
     await close(app)
     await rm(profile, { recursive: true, force: true })

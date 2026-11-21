@@ -1,15 +1,23 @@
+export const MAX_TERMS = 64
+export const MAX_TERM_LENGTH = 80
+export const MAX_TERM_MEANING_LENGTH = 300
+export type GlossaryEntry = { term: string; meaning: string }
+
 export type Settings = {
   transcriptionModel: string
   cleanupModel: string
   shortcut: string
   microphoneId: string
-  terms: string[]
+  terms: GlossaryEntry[]
 }
 export type Phase = 'idle' | 'recording' | 'transcribing' | 'cleaning' | 'pasting' | 'completed' | 'copy' | 'failed' | 'cancelled'
 export type State = {
   phase: Phase
   id: number
   startedAt?: number
+  resultAt?: number
+  resultId?: string
+  reviewNote?: string
   raw?: string
   cleaned?: string
   message?: string
@@ -17,6 +25,7 @@ export type State = {
 export type Theme = 'light' | 'dark'
 export type PrimaryShortcut = 'Fn' | 'Windows'
 export type ShortcutStatus = 'idle' | 'ready' | 'permission' | 'unavailable'
+export type HistoryEntry = { id: string; recordedAt: number; text: string; reviewNote?: string }
 export type Snapshot = {
   name: string
   settings: Settings
@@ -32,10 +41,13 @@ export type Snapshot = {
   shortcutPermission: ShortcutStatus
   platform: string
   state: State
+  history: HistoryEntry[]
+  historyWarning?: string
 }
 export type KeyAction = 'save' | 'verify' | 'delete'
-export type Permission = 'microphone' | 'accessibility'
+export type Permission = 'microphone' | 'accessibility' | 'keyboard'
 export type Action = 'start' | 'stop' | 'cancel' | 'retry' | 'copyRaw' | 'copyCleaned' | 'dismiss'
+export type OverlayAction = 'stop' | 'cancel' | 'copyResult' | 'closeResult'
 export type RecordingError = 'permission' | 'device' | 'silent' | 'tooLarge' | 'recording'
 export type Recording = { command: 'start' | 'stop' | 'release'; id: number; microphoneId?: string }
 export interface Voice {
@@ -50,7 +62,9 @@ export interface Voice {
   key(action: KeyAction, value?: string): Promise<Snapshot>
   permission(kind: Permission): Promise<Snapshot>
   action(action: Action): Promise<Snapshot>
-  overlayAction(action: 'stop' | 'cancel', id: number): Promise<void>
+  copyHistory(id: string): Promise<void>
+  onHistory(cb: (history: HistoryEntry[], warning?: string) => void): () => void
+  overlayAction(action: OverlayAction, id: number): Promise<void>
   audio(id: number, bytes: ArrayBuffer, mime: string): Promise<void>
   recordingError(id: number, reason: RecordingError): Promise<void>
   onState(cb: (s: State) => void): () => void

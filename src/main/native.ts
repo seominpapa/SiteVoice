@@ -45,19 +45,26 @@ export function createTargetClient(root: string) {
     })
   }
 
-  function request(command: string, signal?: AbortSignal, interactive = false) {
+  function request(command: string, signal?: AbortSignal, interactive = false, refreshPermission = false) {
     // A queued focus snapshot could capture a field the user switched to after the shortcut.
     if (interactive && (pending || !child)) {
       if (!child && !pending) void request('PERMISSION')
       return Promise.resolve(unavailable)
     }
     pending++
-    const response = interactive ? send(command, signal, 800) : queue.then(() => send(command, signal))
+    const response = interactive ? send(command, signal, 800) : queue.then(async () => {
+      const existing = child
+      const reply = await send(command, signal)
+      if (!refreshPermission || reply.ok || reply.reason !== 'permission' || !existing) return reply
+      // A fresh helper rechecks a grant that changed while System Settings was open.
+      retire(existing)
+      return send(command, signal)
+    })
     queue = response.catch(() => unavailable).then(() => { pending-- })
     return response.catch(() => unavailable)
   }
   return {
-    permission: () => request('PERMISSION'),
+    permission: (refresh = false) => request('PERMISSION', undefined, false, refresh),
     requestPermission: () => request('REQUEST_PERMISSION'),
     snapshot: () => request('SNAPSHOT', undefined, true),
     paste: (text: string, signal: AbortSignal) => Buffer.byteLength(text) <= 512 * 1024

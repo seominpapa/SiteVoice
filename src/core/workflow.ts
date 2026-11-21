@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { State } from '../shared.ts'
 import { userMessage } from './errors.ts'
 import { meaningConcern } from './meaning.ts'
@@ -9,7 +10,7 @@ type Dependencies = {
   paste(text: string, signal: AbortSignal): Promise<{ ok: boolean; message?: string }>
   onState(state: State): void
 }
-type Result = Pick<State, 'raw' | 'cleaned'>
+type Result = Pick<State, 'raw' | 'cleaned' | 'resultAt' | 'resultId' | 'reviewNote'>
 type Job = { id: number; controller: AbortController }
 export function isBusy(phase: State['phase']) {
   return phase === 'recording' || phase === 'transcribing' || phase === 'cleaning' || phase === 'pasting'
@@ -59,7 +60,7 @@ export function createWorkflow(deps: Dependencies) {
       return
     }
     if (job !== run) return
-    result = { raw }
+    result = { raw, resultAt: state.startedAt, resultId: randomUUID() }
     await clean(run, raw, true)
   }
   async function clean(run: Job, raw: string, autoPaste: boolean) {
@@ -73,8 +74,9 @@ export function createWorkflow(deps: Dependencies) {
       return
     }
     if (job !== run) return
-    result = { raw, cleaned }
-    const note = meaningConcern(raw, cleaned) ?? (autoPaste ? undefined : '문장을 다시 정리했습니다. 확인한 뒤 복사해 주세요.')
+    const reviewNote = meaningConcern(raw, cleaned)
+    result = { ...result, cleaned, reviewNote }
+    const note = reviewNote ?? (autoPaste ? undefined : '문장을 다시 정리했습니다. 확인한 뒤 복사해 주세요.')
     if (note) {
       finish('copy', note)
       return

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { State } from '../shared';
+import type { OverlayAction, State } from '../shared';
 import { browserRecorder, Capture, monitorMic } from './capture';
 import { Icon, isActive, phaseLabel } from './presentation';
 
@@ -45,6 +45,7 @@ export function Overlay() {
   }, []);
   const recording = state.phase === 'recording';
   const active = isActive(state.phase);
+  const copyText = state.phase === 'copy' ? state.cleaned : undefined;
   useEffect(() => {
     if (!recording) return;
     const timer = setInterval(() => setNow(Date.now()), 200);
@@ -52,7 +53,20 @@ export function Overlay() {
   }, [recording]);
   const seconds = Math.max(0, Math.floor((now - (state.startedAt ?? now)) / 1000));
   const timestamp = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-  const action = (value: 'stop' | 'cancel') => { void window.voice.overlayAction(value, state.id).catch(() => setError(true)); };
+  const action = (value: OverlayAction) => {
+    void window.voice.overlayAction(value, state.id).then(() => setError(false)).catch(() => setError(true));
+  };
+  if (copyText) return <main className={`overlay ${state.reviewNote ? 'overlay-review' : ''}`} data-testid="capture-overlay" aria-label="받아쓴 결과">
+    <span className="overlay-icon"><Icon name="result" size={20}/></span>
+    <div className="overlay-status">
+      <strong role="status">{error ? '결과를 복사할 수 없습니다' : state.reviewNote ?? '붙여넣기 대신 복사'}</strong>
+      <p className="overlay-transcript">{copyText}</p>
+    </div>
+    <div className="overlay-actions">
+      <button type="button" className="button primary overlay-copy" aria-label="복사하기" title="복사하기" onClick={() => action('copyResult')}><Icon name="copy" size={23}/></button>
+      <button type="button" className="button icon-button" aria-label="표시창 닫기" title="표시창 닫기" onClick={() => action('closeResult')}><Icon name="close" size={18}/></button>
+    </div>
+  </main>;
   return <main className="overlay" data-testid="capture-overlay" aria-label="음성 입력 상태">
     <span className="overlay-icon"><Icon name={recording ? 'mic' : 'setup'} size={20}/></span>
     <div className="overlay-status"><strong role="status">{error ? '앱 연결에 문제가 있어요' : phaseLabel[state.phase]}</strong><small>{recording ? connected ? '마이크 연결됨' : '마이크 연결 중' : state.phase === 'pasting' ? '원래 입력 칸을 확인합니다' : active ? '잠시만 기다려 주세요' : '결과는 앱에서 확인하세요'}</small></div>

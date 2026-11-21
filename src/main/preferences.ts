@@ -13,8 +13,15 @@ export function createPreferences(directory: string) {
         const value = await readFile(path, 'utf8')
         if (value.length > 64 * 1024) throw new Error()
         const { theme, autoUpdate, shortcutVersion, ...settings } = JSON.parse(value)
+        const terms: unknown = settings.terms
+        const glossary = Array.isArray(terms)
+          ? terms.map(entry => typeof entry === 'string'
+            ? { term: entry.replace(/[\p{Zl}\p{Zp}]/gu, ' '), meaning: '' } : entry)
+          : terms
         return {
-          settings: validateSettings({ ...settings, shortcut: migrateShortcut(settings.shortcut, shortcutVersion, process.platform) }),
+          settings: validateSettings({
+            ...settings, terms: glossary, shortcut: migrateShortcut(settings.shortcut, shortcutVersion, process.platform)
+          }),
           theme: theme === 'dark' ? 'dark' as const : 'light' as const,
           autoUpdate: autoUpdate !== false
         }

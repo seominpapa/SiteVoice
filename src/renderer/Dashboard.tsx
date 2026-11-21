@@ -7,8 +7,9 @@ import { KeyPanel, SettingsFields } from './Settings';
 
 type Page = 'setup' | 'settings' | 'result';
 const pages = [ ['setup', '시작하기'], ['settings', '환경 설정'], ['result', '결과'] ] as const;
-const actionNotice: Partial<Record<Action, string>> = { copyRaw: '원문을 복사했습니다.', copyCleaned: '정리한 문장을 복사했습니다.' };
+const actionNotice: Partial<Record<Action, string>> = { copyRaw: '문장을 복사했습니다.', copyCleaned: '문장을 복사했습니다.' };
 const keyNotice: Record<KeyAction, string> = { save: 'API 키를 저장했습니다.', verify: '키가 모델 조회에 사용할 수 있는 상태입니다.', delete: '저장한 API 키를 삭제했습니다.' };
+const opensResultPage = (phase: State['phase']) => phase !== 'idle' && phase !== 'copy' && !isActive(phase);
 
 export function Dashboard() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
@@ -20,6 +21,7 @@ export function Dashboard() {
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const latest = useRef<State | undefined>(undefined);
+  const latestHistory = useRef<Pick<Snapshot, 'history' | 'historyWarning'> | undefined>(undefined);
   const content = useRef<HTMLElement>(null);
   useEffect(() => {
     const unsubscribe = window.voice.onState((state) => {
@@ -27,11 +29,16 @@ export function Dashboard() {
       const previous = latest.current;
       latest.current = state;
       setSnapshot((current) => current && { ...current, state });
-      if (state.phase !== 'idle' && !isActive(state.phase) && (previous?.id !== state.id || previous.phase !== state.phase)) {
+      if (opensResultPage(state.phase) && (previous?.id !== state.id || previous.phase !== state.phase)) {
         setPage('result');
         setNotice('');
         setError('');
       }
+    });
+    const unsubscribeHistory = window.voice.onHistory((history, historyWarning) => {
+      const update = { history, historyWarning };
+      latestHistory.current = update;
+      setSnapshot((current) => current && { ...current, ...update });
     });
     let mounted = true;
     void window.voice.get().then((value) => {
@@ -39,9 +46,9 @@ export function Dashboard() {
       document.title = value.name;
       const state = latest.current ?? value.state;
       latest.current = state;
-      setSnapshot({ ...value, state });
+      setSnapshot({ ...value, ...latestHistory.current, state });
       setDraft(value.settings);
-      if (state.phase !== 'idle' && !isActive(state.phase)) setPage('result');
+      if (opensResultPage(state.phase)) setPage('result');
     }).catch((reason: unknown) => { if (mounted) setError(errorMessage(reason)); });
     const refreshPermissions = () => {
       void window.voice.get().then((value) => {
@@ -53,14 +60,14 @@ export function Dashboard() {
       }).catch(() => { /* A permission refresh should not cover an existing result or error. */ });
     };
     window.addEventListener('focus', refreshPermissions);
-    return () => { mounted = false; unsubscribe(); window.removeEventListener('focus', refreshPermissions); };
+    return () => { mounted = false; unsubscribe(); unsubscribeHistory(); window.removeEventListener('focus', refreshPermissions); };
   }, []);
   useEffect(() => { content.current?.scrollTo(0, 0); }, [page]);
 
   function receive(value: Snapshot) {
     const state = latest.current && latest.current.id >= value.state.id ? latest.current : value.state;
     latest.current = state;
-    setSnapshot({ ...value, state });
+    setSnapshot({ ...value, ...latestHistory.current, state });
   }
 
   async function run(work: () => Promise<void>) {
@@ -97,12 +104,17 @@ export function Dashboard() {
   });
 
   const act = (action: Action) => void perform(() => window.voice.action(action), actionNotice[action]);
+  const copyHistory = (id: string) => void run(async () => {
+    await window.voice.copyHistory(id);
+    setNotice('문장을 복사했습니다.');
+  });
   const switchPage = (next: Page) => { setNotice(''); setError(''); setPage(next); };
   const key = (action: KeyAction, value?: string) => perform(() => window.voice.key(action, value), keyNotice[action]);
   if (!snapshot || !draft) return <main className="loading" role={error ? 'alert' : 'status'}>{error || '앱 설정을 불러오는 중입니다.'}</main>;
 
   const mac = snapshot.platform === 'darwin';
   const active = isActive(snapshot.state.phase);
+  const hasResults = snapshot.history.length > 0 || Boolean(snapshot.state.raw || snapshot.state.cleaned);
   const warning = snapshot.state.phase === 'idle' ? snapshot.state.message : undefined;
   const shortcuts = shortcutKeys(snapshot.settings.shortcut, mac);
   const shortcutHelp = !snapshot.keyStored ? '먼저 API 키를 저장해 주세요.'
@@ -112,7 +124,8 @@ export function Dashboard() {
       : '전역 단축키가 연결되지 않았습니다. 환경 설정에서 확인해 주세요.';
   const permissionCard = <section className="panel permission" aria-labelledby="target-heading">
     <div className="panel-heading"><span className="panel-icon"><Icon name="shield"/></span><div><h2 id="target-heading">{mac ? '손쉬운 사용 권한' : '자동 입력 권한'}</h2><p>{mac ? '다른 앱의 입력 칸을 확인하고 붙여넣으려면 이 권한이 필요합니다.' : 'Windows가 입력을 허용하는 편집기에만 붙여넣습니다.'}</p></div><span className="status-badge">{permissionLabel[snapshot.accessibility] ?? '확인 필요'}</span></div>
-    <div className="button-row"><button type="button" className="button secondary" disabled={busy || active} onClick={() => void perform(() => window.voice.permission('accessibility'))}>{mac ? '권한 확인 · 설정 열기' : '자동 입력 상태 확인'}</button></div>
+    {mac && snapshot.accessibility === 'denied' && <p>시스템 설정에서 SiteVoice가 이미 켜져 있는데 이 상태가 유지되면, 그 항목을 제거하고 <code>/Applications/SiteVoice.app</code>을 다시 추가한 뒤 앱을 재시작하세요.</p>}
+    <div className="button-row"><button type="button" className="button secondary" disabled={busy || active} onClick={() => void perform(() => window.voice.permission('accessibility'))}>{mac ? '손쉬운 사용 설정 열기' : '자동 입력 상태 확인'}</button></div>
   </section>;
   const micro = <Microphone key={page} status={snapshot.microphone} deviceId={draft.microphoneId} active={active} onPermission={async () => receive(await window.voice.permission('microphone'))}
     onDevice={page === 'settings' ? (microphoneId) => setDraft({ ...draft, microphoneId }) : undefined}/>;
@@ -120,7 +133,7 @@ export function Dashboard() {
   return <div className="app-shell">
     <header className="topbar">
       <Brand name={snapshot.name}/>
-      <nav aria-label="앱 메뉴">{pages.map(([id, label]) => <button type="button" aria-current={page === id ? 'page' : undefined} aria-description={id === 'result' && (snapshot.state.raw || snapshot.state.cleaned) ? '저장되지 않은 결과가 있습니다.' : undefined} className={`nav-item ${page === id ? 'selected' : ''}`} onClick={() => switchPage(id)} key={id}>{label}{id === 'result' && (snapshot.state.raw || snapshot.state.cleaned) && <span className="nav-dot" aria-hidden="true"/>}</button>)}</nav>
+      <nav aria-label="앱 메뉴">{pages.map(([id, label]) => <button type="button" aria-current={page === id ? 'page' : undefined} aria-description={id === 'result' && hasResults ? '받아쓴 결과가 있습니다.' : undefined} className={`nav-item ${page === id ? 'selected' : ''}`} onClick={() => switchPage(id)} key={id}>{label}{id === 'result' && hasResults && <span className="nav-dot" aria-hidden="true"/>}</button>)}</nav>
       <div className="theme-toggle" role="group" aria-label="화면 테마">
         <button type="button" aria-pressed={snapshot.theme === 'light'} disabled={busy || active} onClick={() => void perform(() => window.voice.setTheme('light'))}><Icon name="sun" size={15}/>밝게</button>
         <button type="button" aria-pressed={snapshot.theme === 'dark'} disabled={busy || active} onClick={() => void perform(() => window.voice.setTheme('dark'))}><Icon name="moon" size={15}/>어둡게</button>
@@ -145,11 +158,13 @@ export function Dashboard() {
           </section>
           <KeyPanel snapshot={snapshot} busy={busy || active} onKey={key}/>
           <SettingsFields draft={draft} change={setDraft} snapshot={snapshot} disabled={busy || active}
-            onShortcutPermission={() => void perform(() => window.voice.requestShortcutPermission())}/>
+            onShortcutPermission={() => void perform(() => window.voice.requestShortcutPermission())}
+            onKeyboardSettings={() => void perform(() => window.voice.permission('keyboard'))}/>
           {micro}{permissionCard}
           <div className="settings-save"><p>API 키 변경은 즉시 반영됩니다.</p><button type="button" className="button primary" disabled={busy || active || JSON.stringify(draft) === JSON.stringify(snapshot.settings)} onClick={() => void perform(() => window.voice.save(draft), '환경 설정을 저장했습니다.', true)}>환경 설정 저장<Icon name="arrow" size={16}/></button></div>
         </>}
-        {page === 'result' && <Result state={snapshot.state} busy={busy} act={act}/>}
+        {page === 'result' && <Result state={snapshot.state} history={snapshot.history} historyWarning={snapshot.historyWarning}
+          busy={busy} act={act} copyHistory={copyHistory}/>}
         <footer className="tray-label"><i aria-hidden="true" className={active ? 'live' : ''}/>{active ? phaseLabel[snapshot.state.phase] : mac ? '메뉴 막대에서 실행 중' : '시스템 트레이에서 실행 중'}</footer>
       </div>
     </main>

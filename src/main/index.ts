@@ -1,17 +1,18 @@
-import { app, autoUpdater, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, systemPreferences, Tray, type IpcMainInvokeEvent } from 'electron'
-import { mkdir } from 'node:fs/promises'
+import { app, autoUpdater, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, shell, systemPreferences, Tray, type IpcMainInvokeEvent } from 'electron'
+import { mkdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createWorkflow, isBusy } from '../core/workflow.ts'
 import { createSpeechService } from '../core/openai.ts'
 import { validateSettings, validateAudio, MAX_RECORDING_MS } from '../core/validation.ts'
-import type { Recording, Snapshot, State, Theme } from '../shared.ts'
+import type { HistoryEntry, Recording, Snapshot, State, Theme } from '../shared.ts'
 import { parseId, parseKey, type NativeReason, type NativeReply, type View } from './boundary.ts'
 import { createTargetClient } from './native.ts'
 import { createPrimaryShortcut } from './native-shortcut.ts'
 import { nativeShortcut } from '../core/shortcuts.ts'
 import { createPreferences } from './preferences.ts'
 import { createVault } from './vault.ts'
+import { createHistory, validateHistoryEntry } from './history.ts'
 import { createWindows, dashboardColor } from './windows.ts'
 import { createUpdateController } from './updates.ts'
 
@@ -44,6 +45,15 @@ function publicMessage(error: unknown) {
     ? error.message : '요청을 처리할 수 없습니다. 다시 시도해 주세요.'
 }
 const permissionMessage = '먼저 환경 설정에서 OpenAI API 키를 저장해 주세요.'
+const macSettings = {
+  accessibility: 'com.apple.preference.security?Privacy_Accessibility',
+  inputMonitoring: 'com.apple.preference.security?Privacy_ListenEvent',
+  keyboard: 'com.apple.Keyboard-Settings.extension'
+} as const
+async function openMacSettings(section: keyof typeof macSettings) {
+  try { await shell.openExternal('x-apple.systempreferences:' + macSettings[section]) }
+  catch { throw new Error('시스템 설정을 열지 못했습니다. macOS 시스템 설정에서 직접 열어 주세요.') }
+}
 
 async function startApp() {
   const name = app.getName()
@@ -60,22 +70,49 @@ async function startApp() {
   let autoUpdate = loaded.autoUpdate
   nativeTheme.themeSource = theme
   let settingsWarning = loaded.message
-  const vault = createVault(directory, {
+  const codec = {
     available: () => ['darwin', 'win32'].includes(process.platform) ? safeStorage.isAsyncEncryptionAvailable() : Promise.resolve(false),
-    encrypt: value => safeStorage.encryptStringAsync(value),
-    decrypt: async bytes => {
+    encrypt: (value: string) => safeStorage.encryptStringAsync(value),
+    decrypt: async (bytes: Buffer) => {
       const result = await safeStorage.decryptStringAsync(bytes)
       return result.shouldReEncrypt ? (await safeStorage.decryptStringAsync(bytes)).result : result.result
     }
-  })
+  }
+  const vault = createVault(directory, codec)
   let keyWarning: string | undefined
   let key = await vault.read().catch(error => { keyWarning = publicMessage(error); return undefined })
+  const historyStore = createHistory(directory, codec)
+  let historyReadWarning: string | undefined
+  let historyWriteWarning: string | undefined
+  const historyWarning = () => historyWriteWarning || historyReadWarning
+  let historyWrite = Promise.resolve()
+  let historyWritesPending = 0
+  let quitAfterHistory = false
+  const recoveryFile = app.commandLine.getSwitchValue('recover-sitevoice-result')
+  if (recoveryFile) {
+    try {
+      const info = await stat(recoveryFile)
+      if (!info.isFile() || info.size > 512 * 1024) throw new Error()
+      const file = await readFile(recoveryFile, 'utf8')
+      if (file.length > 512 * 1024) throw new Error()
+      await historyStore.save(validateHistoryEntry(JSON.parse(file)))
+    } catch {
+      historyWriteWarning = '이전 결과를 기록에 옮기지 못했습니다. 별도로 보관한 백업을 확인해 주세요.'
+    }
+  }
+  let history = await historyStore.read(() => {
+    historyReadWarning = '일부 받아쓰기 기록을 열지 못했습니다. 다른 기록은 표시됩니다.'
+  }).catch(() => {
+    historyReadWarning = '받아쓰기 기록을 열지 못했습니다. 운영체제 보안 저장소를 확인해 주세요.'
+    return []
+  })
   let acceleratorRegistered = false
   let capturingShortcut = false
   const usesNative = () => settings.shortcut === primaryKey
   let overlayReady = false
   let quitting = false
   let prior: State | undefined
+  let overlayRecordingId = 0
   let target: Promise<NativeReply> | undefined
   let captureTimer: NodeJS.Timeout | undefined
   let audioTimer: NodeJS.Timeout | undefined
@@ -124,13 +161,13 @@ async function startApp() {
   const updates = createUpdateController({
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
-    canInterrupt: () => !quitting && !operation && !capturingShortcut && !isBusy(workflow.getState().phase),
+    canInterrupt: () => !quitting && !operation && !capturingShortcut && !historyWritesPending && !isBusy(workflow.getState().phase),
     async confirm(version) {
       const result = await dialog.showMessageBox(windows.dashboard, {
         type: 'question',
         title: name + ' 업데이트',
         message: '새 버전 ' + version + '을 설치할까요?',
-        detail: '설치를 선택하면 업데이트를 내려받은 뒤 앱을 다시 시작합니다. 열려 있는 결과는 닫힙니다.',
+        detail: '설치를 선택하면 업데이트를 내려받은 뒤 앱을 다시 시작합니다. 저장된 받아쓰기 기록은 유지됩니다.',
         buttons: ['나중에', '업데이트 설치'],
         defaultId: 0,
         cancelId: 0,
@@ -149,11 +186,38 @@ async function startApp() {
     if (!overlayReady || quitting || windows.overlay.isDestroyed()) return
     windows.overlay.webContents.send('voice:record', { command, id, microphoneId: settings.microphoneId } satisfies Recording)
   }
+  function overlayResult(state: State) {
+    return state.phase === 'copy' && state.id === overlayRecordingId ? state.cleaned : undefined
+  }
+  function sendOverlayState(state: State) {
+    const { phase, id, startedAt } = state
+    const cleaned = overlayResult(state)
+    windows.overlay.webContents.send('voice:state', { phase, id, startedAt, cleaned, reviewNote: cleaned ? state.reviewNote : undefined })
+  }
+  function saveFinalResult(state: State) {
+    if ((state.phase !== 'completed' && state.phase !== 'copy') || !state.resultId || !state.resultAt || !state.cleaned) return
+    const entry: HistoryEntry = { id: state.resultId, recordedAt: state.resultAt, text: state.cleaned, reviewNote: state.reviewNote }
+    historyWritesPending++
+    historyWrite = historyWrite.then(async () => {
+      try {
+        await historyStore.save(entry)
+        history = [entry, ...history.filter(item => item.id !== entry.id)].sort((a, b) => b.recordedAt - a.recordedAt)
+      } catch {
+        historyWriteWarning = '받아쓰기 결과를 기록에 저장하지 못했습니다. 앱을 닫기 전에 현재 문장을 복사해 보관하세요.'
+      } finally {
+        historyWritesPending--
+        if (!windows.dashboard.isDestroyed() && !windows.dashboard.webContents.isDestroyed()) {
+          windows.dashboard.webContents.send('voice:history', { history, warning: historyWarning() })
+        }
+      }
+    })
+  }
   function publish(state: State) {
     if (quitting) return
-    const { phase, id, startedAt } = state
+    const { phase } = state
     windows.dashboard.webContents.send('voice:state', state)
-    windows.overlay.webContents.send('voice:state', { phase, id, startedAt, message: state.message })
+    saveFinalResult(state)
+    if (overlayReady) sendOverlayState(state)
     tray.setToolTip(name + (phase === 'recording' ? ' · 녹음 중' : running.has(phase) ? ' · 처리 중' : ''))
     const trayIcon = icon(phase === 'recording' ? 'tray-recording.png' : (process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png'))
     if (process.platform === 'darwin' && phase !== 'recording') trayIcon.setTemplateImage(true)
@@ -171,17 +235,17 @@ async function startApp() {
         void targets.reset()
         target = undefined
       }
-      if ((phase === 'copy' || phase === 'failed') && !windows.dashboard.isVisible()) windows.dashboard.showInactive()
+      if (phase === 'failed' && !windows.dashboard.isVisible()) windows.dashboard.showInactive()
       clearTimeout(hideTimer)
-      hideTimer = setTimeout(() => windows.overlay.hide(), phase === 'idle' ? 0 : 2500)
+      if (!overlayResult(state)) hideTimer = setTimeout(() => windows.overlay.hide(), phase === 'idle' ? 0 : 2500)
     }
     prior = state
   }
 
-  async function snapshot(): Promise<Snapshot> {
+  async function snapshot(refreshPermissions = false): Promise<Snapshot> {
     const mic = microphone()
-    if (usesNative() && primary.status === 'idle') await primary.start()
-    const trusted = await targets.permission()
+    if (usesNative() && (primary.status === 'idle' || (refreshPermissions && primary.status !== 'ready'))) await primary.start()
+    const trusted = await targets.permission(refreshPermissions)
     const accessibility = process.platform === 'darwin'
       ? trusted.ok ? 'granted' : trusted.reason === 'permission' ? 'denied' : 'unavailable'
       : trusted.ok ? 'available' : 'unavailable'
@@ -191,12 +255,12 @@ async function startApp() {
         ? safeStorage.isAsyncEncryptionAvailable().catch(() => false) : Promise.resolve(false)),
       microphone: mic, accessibility, shortcutPermission: primary.status,
       shortcutRegistered: usesNative() ? primary.status === 'ready' : acceleratorRegistered,
-      platform: process.platform, state: resultState()
+      platform: process.platform, state: resultState(), history, historyWarning: historyWarning()
     }
   }
   function showDashboard() { windows.dashboard.show(); windows.dashboard.focus() }
   function begin(external: boolean) {
-    if (isBusy(workflow.getState().phase) || operation || quitting) return
+    if (isBusy(workflow.getState().phase) || operation || quitting || quitAfterHistory) return
     if (updates.busy) throw new Error('업데이트 확인이나 설치가 끝난 뒤 녹음을 시작해 주세요.')
     if (!key) { showDashboard(); throw new Error(permissionMessage) }
     if (!overlayReady) throw new Error('녹음 창을 불러오는 중입니다. 잠시 뒤 다시 시도해 주세요.')
@@ -207,6 +271,7 @@ async function startApp() {
     target = external && !windows.dashboard.isFocused() ? targets.snapshot() : undefined
     if (!workflow.start()) return
     const id = workflow.getState().id
+    overlayRecordingId = id
     try { globalShortcut.register('Escape', () => workflow.cancel()) } catch { /* Overlay cancel still works. */ }
     windows.showOverlay()
     record('start', id)
@@ -269,8 +334,12 @@ async function startApp() {
     })
   }
 
-  handle('get', ['dashboard'], snapshot)
-  handle('ready', ['overlay'], () => { overlayReady = true })
+  handle('get', ['dashboard'], () => snapshot(process.platform === 'darwin' && windows.dashboard.isFocused() && !isBusy(workflow.getState().phase)))
+  handle('ready', ['overlay'], () => {
+    overlayReady = true
+    const state = workflow.getState()
+    if (overlayResult(state)) sendOverlayState(state)
+  })
   handle('shortcut-capture', ['dashboard'], async (enabled: unknown) => {
     if (typeof enabled !== 'boolean') throw new Error('단축키 입력 상태를 확인할 수 없습니다.')
     if (!enabled) { finishShortcutCapture(); return false }
@@ -287,9 +356,9 @@ async function startApp() {
     return (await primary.start()) === 'ready' && capturingShortcut
   })
   handle('shortcut-permission', ['dashboard'], async () => {
-    if (process.platform === 'darwin' && windows.dashboard.isFocused()) {
-      await primary.requestPermission()
-      if (usesNative() || capturingShortcut) await primary.start()
+    if (process.platform === 'darwin') {
+      if (windows.dashboard.isFocused() && primary.status !== 'ready') await primary.requestPermission()
+      await openMacSettings('inputMonitoring')
     }
     return snapshot()
   })
@@ -357,25 +426,31 @@ async function startApp() {
     return snapshot()
   }))
   handle('permission', ['dashboard'], async (input: unknown) => {
-    const kind = selection(input, ['microphone', 'accessibility'])
+    const kind = selection(input, ['microphone', 'accessibility', 'keyboard'])
     if (process.platform === 'darwin') {
       if (kind === 'microphone' && microphone() === 'not-determined') await systemPreferences.askForMediaAccess('microphone')
-      if (kind === 'accessibility') await targets.requestPermission()
+      if (kind === 'accessibility') {
+        if (!(await targets.permission(true)).ok) await targets.requestPermission()
+        await openMacSettings('accessibility')
+      }
+      if (kind === 'keyboard') await openMacSettings('keyboard')
     }
     return snapshot()
   })
 
-  function runAction(action: unknown, dashboard: boolean) {
-    switch (selection(action, dashboard
-      ? ['start', 'stop', 'cancel', 'retry', 'copyRaw', 'copyCleaned', 'dismiss'] as const
-      : ['stop', 'cancel'] as const)) {
+  function runAction(action: unknown) {
+    switch (selection(action, ['start', 'stop', 'cancel', 'retry', 'copyRaw', 'copyCleaned', 'dismiss'] as const)) {
       case 'start': begin(false); break
       case 'stop': end(); break
       case 'cancel': workflow.cancel(); break
       case 'retry':
         if (updates.busy) throw new Error('업데이트 확인이나 설치가 끝난 뒤 다시 시도해 주세요.')
         if (!key) throw new Error(permissionMessage)
-        if (!operation) void workflow.retry()
+        if (!operation && workflow.getState().raw && !isBusy(workflow.getState().phase)) {
+          overlayRecordingId = 0
+          windows.overlay.hide()
+          void workflow.retry()
+        }
         break
       case 'dismiss': workflow.dismiss(); break
       case 'copyRaw':
@@ -389,10 +464,29 @@ async function startApp() {
       }
     }
   }
-  // Separate action channels to avoid sending settings or results to the overlay.
-  handle('action', ['dashboard'], (action: unknown) => { runAction(action, true); return snapshot() })
+  handle('action', ['dashboard'], (action: unknown) => { runAction(action); return snapshot() })
+  handle('copy-history', ['dashboard'], (id: unknown) => {
+    if (workflow.getState().phase === 'pasting') throw new Error('붙여넣기 키 입력이 끝난 뒤 다시 시도해 주세요.')
+    const entry = typeof id === 'string' && id.length === 36 ? history.find(item => item.id === id) : undefined
+    if (!entry) throw new Error('복사할 기록을 찾을 수 없습니다.')
+    clipboard.writeText(entry.text)
+  })
   handle('overlay-action', ['overlay'], (action: unknown, id: unknown) => {
-    if (parseId(id) === workflow.getState().id) runAction(action, false)
+    const state = workflow.getState()
+    if (parseId(id) !== state.id) throw new Error('표시창의 작업이 바뀌었습니다.')
+    switch (selection(action, ['stop', 'cancel', 'copyResult', 'closeResult'])) {
+      case 'stop': end(); break
+      case 'cancel': workflow.cancel(); break
+      case 'copyResult':
+      case 'closeResult': {
+        const text = overlayResult(state)
+        if (!text || !windows.overlay.isVisible()) throw new Error('표시창에 복사할 문장이 없습니다.')
+        if (action === 'copyResult') clipboard.writeText(text)
+        overlayRecordingId = 0
+        windows.overlay.hide()
+        break
+      }
+    }
   })
   handle('audio', ['overlay'], (value: unknown, bytes: unknown, mime: unknown) => {
     const id = parseId(value)
@@ -443,7 +537,15 @@ async function startApp() {
   app.on('activate', showDashboard)
   app.on('second-instance', showDashboard)
   autoUpdater.on('before-quit-for-update', () => { quitting = true })
-  app.on('before-quit', () => {
+  app.on('before-quit', (event) => {
+    if (historyWritesPending) {
+      event.preventDefault()
+      if (!quitAfterHistory) {
+        quitAfterHistory = true
+        void historyWrite.then(() => { quitAfterHistory = false; app.quit() })
+      }
+      return
+    }
     quitting = true
     workflow.cancel()
     globalShortcut.unregisterAll()

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Voice } from '../shared.ts'
+import type { HistoryEntry, Voice } from '../shared.ts'
 
 const subscribe = <T,>(channel: string, fn: (data: T) => void) => {
   const listener = (_: unknown, data: T) => fn(data)
@@ -23,6 +23,8 @@ const bridge: Voice = {
   key: (action, value) => invoke('voice:key', action, value),
   permission: kind => invoke('voice:permission', kind),
   action: action => invoke('voice:action', action),
+  copyHistory: id => invoke('voice:copy-history', id),
+  onHistory: cb => subscribe<{ history: HistoryEntry[]; warning?: string }>('voice:history', ({ history, warning }) => cb(history, warning)),
   overlayAction: (action, id) => invoke('voice:overlay-action', action, id),
   audio: (id, bytes, mime) => invoke('voice:audio', id, bytes, mime),
   recordingError: (id, reason) => invoke('voice:error', id, reason),
@@ -37,6 +39,6 @@ if (window.location.hash === '#overlay') {
   const { overlayAction, audio, recordingError, onState, onRecording, ready } = bridge
   contextBridge.exposeInMainWorld('voice', { overlayAction, audio, recordingError, onState, onRecording, ready })
 } else {
-  const { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, onState } = bridge
-  contextBridge.exposeInMainWorld('voice', { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, onState })
+  const { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, copyHistory, onHistory, onState } = bridge
+  contextBridge.exposeInMainWorld('voice', { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, copyHistory, onHistory, onState })
 }

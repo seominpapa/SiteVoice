@@ -1,4 +1,4 @@
-import type { Settings } from '../shared.ts'
+import { MAX_TERMS, MAX_TERM_LENGTH, MAX_TERM_MEANING_LENGTH, type GlossaryEntry, type Settings } from '../shared.ts'
 import { ServiceError } from './errors.ts'
 import { defaultShortcut, validateShortcut } from './shortcuts.ts'
 
@@ -12,8 +12,6 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export const MAX_AUDIO_BYTES = 20 * 1024 * 1024
 export const MAX_RECORDING_MS = 5 * 60 * 1000
-export const MAX_TERMS = 64
-export const MAX_TERM_LENGTH = 80
 export const MAX_TEXT_LENGTH = 60_000
 export type Audio = {
   bytes: ArrayBuffer
@@ -23,6 +21,33 @@ export type Audio = {
 
 const modelId = /^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,127}$/
 const controlCharacter = /[\p{Cc}\p{Cf}]/u
+const glossaryBreak = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+function glossaryText(value: unknown, limit: number) {
+  if (typeof value !== 'string' || value.length > limit || glossaryBreak.test(value)) return undefined
+  const text = value.trim().normalize('NFC')
+  return text.length <= limit ? text : undefined
+}
+
+function validateGlossary(value: unknown): GlossaryEntry[] {
+  const error = '용어는 80자, 뜻·사용 맥락은 300자 이내로 줄바꿈 없이 최대 64개까지 등록할 수 있습니다.'
+  if (!Array.isArray(value) || value.length > MAX_TERMS) throw new ServiceError(error)
+  const glossary = new Map<string, GlossaryEntry>()
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Object.keys(entry).sort().join(',') !== 'meaning,term') {
+      throw new ServiceError(error)
+    }
+    const term = glossaryText(entry.term, MAX_TERM_LENGTH)
+    const meaning = glossaryText(entry.meaning, MAX_TERM_MEANING_LENGTH)
+    if (!term || meaning === undefined) throw new ServiceError(error)
+    const existing = glossary.get(term)
+    if (existing?.meaning && meaning && existing.meaning !== meaning) {
+      throw new ServiceError('같은 용어에 서로 다른 뜻이 있습니다. 하나로 합쳐 주세요.')
+    }
+    if (!existing?.meaning) glossary.set(term, { term, meaning })
+  }
+  return [...glossary.values()]
+}
+
 export function validateSettings(input: unknown, platform: string = process.platform): Settings {
   if (!input || typeof input !== 'object' || Object.keys(input).sort().join(',') !== 'cleanupModel,microphoneId,shortcut,terms,transcriptionModel') {
     throw new ServiceError('저장할 설정 형식을 확인해 주세요.')
@@ -34,11 +59,6 @@ export function validateSettings(input: unknown, platform: string = process.plat
     }
     return candidate.trim()
   }
-  const terms = value.terms
-  if (!Array.isArray(terms) || terms.length > MAX_TERMS || terms.some(term =>
-    typeof term !== 'string' || term.length > MAX_TERM_LENGTH || !term.trim() || controlCharacter.test(term))) {
-    throw new ServiceError('용어는 줄바꿈 없이 항목당 80자, 총 64개까지 등록할 수 있습니다.')
-  }
   const microphone = value.microphoneId
   if (typeof microphone !== 'string' || microphone.length > 256 || controlCharacter.test(microphone)) {
     throw new ServiceError('마이크를 다시 선택해 주세요.')
@@ -48,7 +68,7 @@ export function validateSettings(input: unknown, platform: string = process.plat
     cleanupModel: model(value.cleanupModel),
     shortcut: validateShortcut(value.shortcut, platform),
     microphoneId: microphone,
-    terms: [...new Set(terms.map(term => term.trim().normalize('NFC')))],
+    terms: validateGlossary(value.terms),
   }
 }
 

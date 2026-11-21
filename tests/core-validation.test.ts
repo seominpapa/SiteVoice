@@ -4,14 +4,31 @@ import { DEFAULT_SETTINGS, MAX_AUDIO_BYTES, validateAudio, validateSettings } fr
 import { meaningConcern } from '../src/core/meaning.ts'
 
 test('settings validate every IPC field and normalize the dictionary', () => {
-  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, terms: [' SiteCAD ', '흙막이', 'SiteCAD', '숏크리트'] }).terms,
-    ['SiteCAD', '흙막이', '숏크리트'])
+  const terms = [
+    { term: ' SiteCAD ', meaning: ' ' },
+    { term: '흙막이', meaning: ' 흙이 무너지지 않게 지지하는 구조물 ' },
+    { term: 'SiteCAD', meaning: '도면 검토 앱' },
+    { term: '숏크리트'.normalize('NFD'), meaning: '뿜어 붙이는 콘크리트'.normalize('NFD') },
+  ]
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, terms }).terms, [
+    { term: 'SiteCAD', meaning: '도면 검토 앱' },
+    { term: '흙막이', meaning: '흙이 무너지지 않게 지지하는 구조물' },
+    { term: '숏크리트', meaning: '뿜어 붙이는 콘크리트' },
+  ])
+  assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, terms: [
+    { term: 'SiteCAD', meaning: '도면 검토 앱' },
+    { term: 'SiteCAD', meaning: '별개의 용어' },
+  ] }), /서로 다른 뜻/)
   assert.throws(() => validateSettings(null))
   assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, transcriptionModel: '../models' }))
   assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, cleanupModel: 'https://model-id' }))
-  assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, terms: [3] }))
-  assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, terms: ['line\nbreak'] }))
-  assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, terms: Array(65).fill('현장') }))
+  for (const bad of [
+    [3], ['SiteCAD'], [{ term: 'SiteCAD' }], [{ term: ' ', meaning: '도면 검토 앱' }],
+    [{ term: '현장\nA', meaning: '' }], [{ term: '현장', meaning: '설명\u2028줄 바꿈' }],
+    [{ term: '현장', meaning: '설명\nbreak' }], [{ term: '현장', meaning: '가'.repeat(301) }],
+    [{ term: '가'.repeat(81), meaning: '' }], [{ term: '현장', meaning: 3 }],
+    [{ term: '현장', meaning: '공사 현장', extra: true }], Array(65).fill({ term: '현장', meaning: '' }),
+  ]) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, terms: bad }), /용어/)
   assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, microphoneId: false }))
   assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, shortcut: 'Shift+S' }))
   assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, shortcut: 'Ctrl+Control+Space' }))

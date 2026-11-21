@@ -96,12 +96,13 @@ export function createSpeechService(apiKey: string, request?: typeof fetch) {
     try {
       const model = settings.transcriptionModel
       const common = { file: new File([audio.bytes], 'recording.' + audio.extension, { type: audio.mime }), model }
+      const terms = settings.terms.map(entry => entry.term)
       // The API documents these multipart fields; the installed SDK types still omit them.
       const fields = /^gpt-transcribe(?:-|$)/.test(model)
-        ? { ...common, languages: ['ko', 'en'], keywords: settings.terms }
+        ? { ...common, languages: ['ko', 'en'], keywords: terms }
         : model === 'gpt-4o-transcribe-diarize'
           ? { ...common, chunking_strategy: 'auto' as const }
-          : { ...common, prompt: settings.terms.length ? '고유명사와 전문 용어: ' + settings.terms.join(', ') : undefined }
+          : { ...common, prompt: terms.length ? '고유명사와 전문 용어: ' + terms.join(', ') : undefined }
       const response = await client.audio.transcriptions.create(fields, { signal })
       const text = textValue(response.text)
       if (!text) throw new ServiceError('음성 전사: 전사할 음성이 없거나 결과를 읽을 수 없습니다.')
@@ -116,7 +117,7 @@ export function createSpeechService(apiKey: string, request?: typeof fetch) {
       const response = await client.responses.create({
         model: settings.cleanupModel,
         instructions: CLEANUP_PROMPT,
-        input: JSON.stringify({ transcript: raw }),
+        input: JSON.stringify({ transcript: raw, glossary: settings.terms }),
         text: { format: cleanFormat },
         max_output_tokens: 12_000,
         store: false,

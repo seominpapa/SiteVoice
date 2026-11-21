@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
-import { rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { trustedView, parseKey, parseId, nativeReply } from '../src/main/boundary.ts'
 import { createVault } from '../src/main/vault.ts'
+import { createTargetClient } from '../src/main/native.ts'
 
 test('IPC accepts only the exact expected main frame and least privileged view', () => {
   const page = 'file:///VoiceInput/index.html'
@@ -56,6 +56,26 @@ test('vault persists encrypted bytes across process instances and deletes them o
     await writeFile(first.path, Buffer.alloc(8193))
     await assert.rejects(first.read(), /읽을 수/)
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('rechecks a changed accessibility grant in a fresh helper after a stale denial', { skip: process.platform !== 'darwin' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sitevoice-target-'))
+  const helperPath = join(dir, process.platform + '-' + process.arch)
+  const targets = createTargetClient(dir)
+  try {
+    await mkdir(helperPath)
+    await writeFile(join(helperPath, 'voice-target'), '#!' + process.execPath + '\n' +
+      'const granted = require("node:fs").existsSync(__dirname + "/grant");\n' +
+      'require("node:readline").createInterface({ input: process.stdin }).on("line", () => ' +
+      'console.log(JSON.stringify(granted ? {ok:true} : {ok:false, reason:"permission"})));\n', { mode: 0o700 })
+    assert.deepEqual(await targets.permission(), { ok: false, reason: 'permission' })
+    await writeFile(join(helperPath, 'grant'), '')
+    assert.deepEqual(await targets.permission(), { ok: false, reason: 'permission' })
+    assert.deepEqual(await targets.permission(true), { ok: true })
+  } finally {
+    targets.close()
     await rm(dir, { recursive: true, force: true })
   }
 })

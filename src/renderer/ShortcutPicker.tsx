@@ -3,7 +3,7 @@ import { defaultShortcut, nativeShortcut, shortcutFromKey } from '../core/shortc
 import type { Snapshot } from '../shared';
 import { errorMessage, shortcutKeys } from './presentation';
 
-export function ShortcutPicker({ value, platform, status, registered, disabled, onChange, onPermission }: {
+export function ShortcutPicker({ value, platform, status, registered, disabled, onChange, onPermission, onKeyboardSettings }: {
   value: string;
   platform: string;
   status: Snapshot['shortcutPermission'];
@@ -11,6 +11,7 @@ export function ShortcutPicker({ value, platform, status, registered, disabled, 
   disabled: boolean;
   onChange(value: string): void;
   onPermission(): void;
+  onKeyboardSettings(): void;
 }) {
   const [recording, setRecording] = useState(false);
   const [note, setNote] = useState('');
@@ -18,7 +19,7 @@ export function ShortcutPicker({ value, platform, status, registered, disabled, 
   const mac = platform === 'darwin';
   const specialKey = nativeShortcut(platform);
   const platformDefault = defaultShortcut(platform);
-  const needsPermission = mac && (status === 'idle' || status === 'permission');
+  const example = mac ? 'Control + Option + Space' : 'Ctrl + Alt + Space';
 
   const release = useCallback(() => {
     if (!session.current) return;
@@ -69,10 +70,10 @@ export function ShortcutPicker({ value, platform, status, registered, disabled, 
     const id = Symbol();
     session.current = id;
     setRecording(true);
-    setNote('키를 누르세요. Esc로 취소할 수 있습니다.');
+    setNote(`키를 누르세요. 예: ${example}. Esc로 취소합니다.`);
     void window.voice.setShortcutCapture(true).then((nativeAvailable) => {
       if (session.current === id && specialKey && !nativeAvailable) {
-        setNote(`키 조합을 누르세요. ${specialKey} 단독 키는 기본값 사용으로 선택할 수 있습니다.`);
+        setNote(`${specialKey} 단독 입력은 아직 사용할 수 없습니다. 키 조합(예: ${example})은 지금 입력할 수 있습니다.`);
       }
     }).catch((reason: unknown) => {
       if (session.current === id) stop(errorMessage(reason));
@@ -104,8 +105,14 @@ export function ShortcutPicker({ value, platform, status, registered, disabled, 
     </div>
     <small id="shortcut-hint">키 조합을 직접 누른 뒤 환경 설정을 저장하세요. 기본값: {shortcutKeys(platformDefault, mac).join(' + ')}.</small>
     <p id="shortcut-capture-status" role="status">{note}</p>
-    {needsPermission && <div className="button-row shortcut-permission"><small>Mac에서 Fn을 단독 단축키로 사용하려면 입력 모니터링 권한이 필요합니다.</small>
-      <button type="button" className="button secondary" disabled={disabled} onClick={onPermission}>입력 모니터링 권한 요청</button></div>}
-    {!registered && !needsPermission && <p className="inline-error">단축키를 사용할 수 없습니다. 다른 앱과 겹치면 다른 조합을 선택하세요.</p>}
+    {mac && <div className="button-row shortcut-permission">
+      <small>{status === 'ready' ? 'Fn 단독 입력을 감지할 수 있습니다.'
+        : 'Fn이 감지되지 않으면 입력 모니터링에서 SiteVoice를 허용하세요. 일반 키 조합은 이 권한 없이도 설정할 수 있습니다.'}</small>
+      <button type="button" className="button secondary" disabled={disabled} onClick={onPermission}>입력 모니터링 설정 열기</button></div>}
+    {mac && value === 'Fn' && <div className="button-row shortcut-permission">
+      <small>Fn을 눌렀을 때 이모지 창도 열리면, 키보드 설정에서 ‘🌐 키를 누를 때 실행할 동작’을 ‘안 함’으로 바꾸세요.</small>
+      <button type="button" className="button secondary" disabled={disabled} onClick={onKeyboardSettings}>키보드 설정 열기</button>
+    </div>}
+    {!registered && !(mac && value === 'Fn') && <p className="inline-error">저장된 전역 단축키가 연결되지 않았습니다. 다른 키 조합을 선택하고 저장해 주세요.</p>}
   </div>;
 }
