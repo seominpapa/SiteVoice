@@ -8,6 +8,8 @@ import { validateSettings, validateAudio, MAX_RECORDING_MS } from '../core/valid
 import type { Recording, Snapshot, State, Theme } from '../shared.ts'
 import { parseId, parseKey, type NativeReason, type NativeReply, type View } from './boundary.ts'
 import { createTargetClient } from './native.ts'
+import { createPrimaryShortcut } from './native-shortcut.ts'
+import { nativeShortcut } from '../core/shortcuts.ts'
 import { createPreferences } from './preferences.ts'
 import { createVault } from './vault.ts'
 import { createWindows, dashboardColor } from './windows.ts'
@@ -47,7 +49,9 @@ async function startApp() {
   const name = app.getName()
   const directory = app.getPath('userData')
   const resources = app.isPackaged ? process.resourcesPath : app.getAppPath()
-  const targets = createTargetClient(join(resources, app.isPackaged ? 'targets' : 'native/bin'))
+  const nativeRoot = join(resources, app.isPackaged ? 'targets' : 'native/bin')
+  const targets = createTargetClient(nativeRoot)
+  const primaryKey = nativeShortcut(process.platform)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const prefs = createPreferences(directory)
   const loaded = await prefs.read()
@@ -66,7 +70,9 @@ async function startApp() {
   })
   let keyWarning: string | undefined
   let key = await vault.read().catch(error => { keyWarning = publicMessage(error); return undefined })
-  let shortcutRegistered = false
+  let acceleratorRegistered = false
+  let capturingShortcut = false
+  const usesNative = () => settings.shortcut === primaryKey
   let overlayReady = false
   let quitting = false
   let prior: State | undefined
@@ -85,6 +91,12 @@ async function startApp() {
   for (const window of themedWindows) {
     window.webContents.on('did-finish-load', () => window.webContents.send('voice:appearance', theme))
   }
+  const primary = createPrimaryShortcut(nativeRoot, () => {
+    if (quitting || !primaryKey) return
+    if (capturingShortcut) {
+      if (windows.dashboard.isFocused()) windows.dashboard.webContents.send('voice:shortcut-captured', primaryKey)
+    } else if (usesNative()) toggle()
+  })
   const microphone = () => systemPreferences.getMediaAccessStatus('microphone')
   const icon = (file: string) => nativeImage.createFromPath(join(resources, 'build', file))
   function service() {
@@ -112,7 +124,7 @@ async function startApp() {
   const updates = createUpdateController({
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
-    canInterrupt: () => !quitting && !operation && !isBusy(workflow.getState().phase),
+    canInterrupt: () => !quitting && !operation && !capturingShortcut && !isBusy(workflow.getState().phase),
     async confirm(version) {
       const result = await dialog.showMessageBox(windows.dashboard, {
         type: 'question',
@@ -168,6 +180,7 @@ async function startApp() {
 
   async function snapshot(): Promise<Snapshot> {
     const mic = microphone()
+    if (usesNative() && primary.status === 'idle') await primary.start()
     const trusted = await targets.permission()
     const accessibility = process.platform === 'darwin'
       ? trusted.ok ? 'granted' : trusted.reason === 'permission' ? 'denied' : 'unavailable'
@@ -176,7 +189,9 @@ async function startApp() {
       name, settings, theme, version: app.getVersion(), autoUpdate, updatesAvailable: updates.available,
       keyStored: !!key, protectedStorage: await (['darwin', 'win32'].includes(process.platform)
         ? safeStorage.isAsyncEncryptionAvailable().catch(() => false) : Promise.resolve(false)),
-      microphone: mic, accessibility, shortcutRegistered, platform: process.platform, state: resultState()
+      microphone: mic, accessibility, shortcutPermission: primary.status,
+      shortcutRegistered: usesNative() ? primary.status === 'ready' : acceleratorRegistered,
+      platform: process.platform, state: resultState()
     }
   }
   function showDashboard() { windows.dashboard.show(); windows.dashboard.focus() }
@@ -218,7 +233,20 @@ async function startApp() {
     }
   }
   function register(shortcut: string) {
-    try { return globalShortcut.register(shortcut, toggle) } catch { return false }
+    try { return globalShortcut.register(shortcut, () => { if (!capturingShortcut) toggle() }) } catch { return false }
+  }
+  function resumeShortcut() {
+    if (quitting) return
+    if (usesNative()) void primary.start()
+    else {
+      primary.stop()
+      acceleratorRegistered = register(settings.shortcut)
+    }
+  }
+  function finishShortcutCapture() {
+    if (!capturingShortcut) return
+    capturingShortcut = false
+    resumeShortcut()
   }
   async function exclusive<T>(run: () => Promise<T>) {
     if (operation || updates.busy || isBusy(workflow.getState().phase)) throw new Error('진행 중인 작업이 끝나면 다시 시도해 주세요.')
@@ -243,19 +271,52 @@ async function startApp() {
 
   handle('get', ['dashboard'], snapshot)
   handle('ready', ['overlay'], () => { overlayReady = true })
+  handle('shortcut-capture', ['dashboard'], async (enabled: unknown) => {
+    if (typeof enabled !== 'boolean') throw new Error('단축키 입력 상태를 확인할 수 없습니다.')
+    if (!enabled) { finishShortcutCapture(); return false }
+    if (!windows.dashboard.isFocused() || quitting || operation || updates.busy || isBusy(workflow.getState().phase)) {
+      throw new Error('설정 창의 작업이 끝난 뒤 단축키를 입력해 주세요.')
+    }
+    if (!capturingShortcut) {
+      capturingShortcut = true
+      if (!usesNative() && acceleratorRegistered) {
+        globalShortcut.unregister(settings.shortcut)
+        acceleratorRegistered = false
+      }
+    }
+    return (await primary.start()) === 'ready' && capturingShortcut
+  })
+  handle('shortcut-permission', ['dashboard'], async () => {
+    if (process.platform === 'darwin' && windows.dashboard.isFocused()) {
+      await primary.requestPermission()
+      if (usesNative() || capturingShortcut) await primary.start()
+    }
+    return snapshot()
+  })
   handle('save', ['dashboard'], (input: unknown) => exclusive(async () => {
     const next = validateSettings(input)
-    const changed = next.shortcut !== settings.shortcut || !shortcutRegistered
-    if (changed && !register(next.shortcut)) throw new Error('이 단축키를 등록할 수 없습니다. 다른 조합으로 설정해 주세요.')
+    finishShortcutCapture()
+    const priorShortcut = settings.shortcut
+    const changed = next.shortcut !== priorShortcut
+    const hasPreviousAccelerator = !usesNative() && acceleratorRegistered
+    const nextIsAccelerator = next.shortcut !== primaryKey
+    const sameRegistration = nextIsAccelerator && hasPreviousAccelerator &&
+      (!changed || globalShortcut.isRegistered(next.shortcut))
+    const addAccelerator = nextIsAccelerator && !sameRegistration
+    if (addAccelerator && !register(next.shortcut)) {
+      throw new Error('이 단축키를 등록할 수 없습니다. 다른 조합으로 설정해 주세요.')
+    }
     try { await prefs.write(next, theme, autoUpdate) }
     catch (error) {
-      if (changed) globalShortcut.unregister(next.shortcut)
+      if (addAccelerator) globalShortcut.unregister(next.shortcut)
       throw error
     }
-    if (changed && shortcutRegistered) globalShortcut.unregister(settings.shortcut)
+    if (hasPreviousAccelerator && !sameRegistration) globalShortcut.unregister(priorShortcut)
+    acceleratorRegistered = nextIsAccelerator
     settings = next
     settingsWarning = undefined
-    shortcutRegistered = true
+    if (usesNative() && (changed || primary.status !== 'ready')) await primary.start()
+    else if (!usesNative()) primary.stop()
     return snapshot()
   }))
   handle('theme', ['dashboard'], (input: unknown) => exclusive(async () => {
@@ -353,10 +414,20 @@ async function startApp() {
     if (!quitting) windows.overlay.reload()
   })
   windows.overlay.webContents.on('did-start-loading', () => { overlayReady = false })
+  windows.dashboard.on('blur', finishShortcutCapture)
+  windows.dashboard.on('hide', finishShortcutCapture)
+  windows.dashboard.webContents.on('render-process-gone', finishShortcutCapture)
+  windows.dashboard.webContents.on('did-start-loading', finishShortcutCapture)
+  windows.dashboard.on('focus', () => { if (usesNative()) void primary.start() })
   windows.dashboard.on('close', event => {
     if (!quitting) { event.preventDefault(); windows.dashboard.hide() }
   })
-  powerMonitor.on('suspend', () => workflow.cancel('절전 모드로 전환되어 작업을 취소했습니다.'))
+  powerMonitor.on('suspend', () => {
+    finishShortcutCapture()
+    primary.stop()
+    workflow.cancel('절전 모드로 전환되어 작업을 취소했습니다.')
+  })
+  powerMonitor.on('resume', () => { if (usesNative()) void primary.start() })
   const idleIcon = icon(process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png')
   if (process.platform === 'darwin') idleIcon.setTemplateImage(true)
   tray = new Tray(idleIcon)
@@ -376,10 +447,11 @@ async function startApp() {
     quitting = true
     workflow.cancel()
     globalShortcut.unregisterAll()
+    primary.stop()
     targets.close()
     clearTimeout(captureTimer); clearTimeout(audioTimer); clearTimeout(hideTimer)
   })
-  shortcutRegistered = register(settings.shortcut)
+  resumeShortcut()
   void targets.permission()
   await windows.load()
   showDashboard()

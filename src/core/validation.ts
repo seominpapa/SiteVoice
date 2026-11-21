@@ -1,10 +1,11 @@
 import type { Settings } from '../shared.ts'
 import { ServiceError } from './errors.ts'
+import { defaultShortcut, validateShortcut } from './shortcuts.ts'
 
 export const DEFAULT_SETTINGS: Settings = {
   transcriptionModel: 'gpt-transcribe',
   cleanupModel: 'gpt-6-luna',
-  shortcut: 'CommandOrControl+Shift+Space',
+  shortcut: defaultShortcut(process.platform),
   microphoneId: '',
   terms: [],
 }
@@ -20,17 +21,9 @@ export type Audio = {
   extension: 'webm' | 'mp4'
 }
 
-const modifiers = new Map(Object.entries({
-  command: 'cmd', cmd: 'cmd', control: 'ctrl', ctrl: 'ctrl',
-  commandorcontrol: 'cmdctrl', cmdorctrl: 'cmdctrl',
-  alt: 'alt', option: 'alt', altgr: 'altgr', shift: 'shift',
-  super: 'super', meta: 'super',
-}))
 const modelId = /^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,127}$/
 const controlCharacter = /[\p{Cc}\p{Cf}]/u
-const acceleratorKey = /^(?:[a-z0-9]|f(?:[1-9]|1\d|2[0-4])|space|tab|enter|return|insert|delete|backspace|home|end|pageup|pagedown|up|down|left|right|num[0-9]|plus)$/i
-
-export function validateSettings(input: unknown): Settings {
+export function validateSettings(input: unknown, platform: string = process.platform): Settings {
   if (!input || typeof input !== 'object' || Object.keys(input).sort().join(',') !== 'cleanupModel,microphoneId,shortcut,terms,transcriptionModel') {
     throw new ServiceError('저장할 설정 형식을 확인해 주세요.')
   }
@@ -53,22 +46,10 @@ export function validateSettings(input: unknown): Settings {
   return {
     transcriptionModel: model(value.transcriptionModel),
     cleanupModel: model(value.cleanupModel),
-    shortcut: validateShortcut(value.shortcut),
+    shortcut: validateShortcut(value.shortcut, platform),
     microphoneId: microphone,
     terms: [...new Set(terms.map(term => term.trim().normalize('NFC')))],
   }
-}
-
-function validateShortcut(input: unknown) {
-  const parts = typeof input === 'string' && input.length <= 80 ? input.trim().split('+') : []
-  const key = parts.pop()
-  const group = parts.map(part => modifiers.get(part.toLowerCase()))
-  if (!key || !acceleratorKey.test(key) || !group.length || group.includes(undefined) ||
-      group.every(part => part === 'shift') || new Set(group).size !== group.length ||
-      (group.includes('cmdctrl') && (group.includes('cmd') || group.includes('ctrl')))) {
-    throw new ServiceError('단축키 형식을 확인해 주세요. 예: CommandOrControl+Shift+Space')
-  }
-  return [...parts, key].join('+')
 }
 
 export function validateAudio(bytes: unknown, mime: unknown): Audio {

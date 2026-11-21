@@ -15,6 +15,8 @@ export type State = {
   message?: string
 }
 export type Theme = 'light' | 'dark'
+export type PrimaryShortcut = 'Fn' | 'Windows'
+export type ShortcutStatus = 'idle' | 'ready' | 'permission' | 'unavailable'
 export type Snapshot = {
   name: string
   settings: Settings
@@ -27,6 +29,7 @@ export type Snapshot = {
   microphone: string
   accessibility: string
   shortcutRegistered: boolean
+  shortcutPermission: ShortcutStatus
   platform: string
   state: State
 }
@@ -41,6 +44,9 @@ export interface Voice {
   setTheme(theme: Theme): Promise<Snapshot>
   setAutoUpdate(enabled: boolean): Promise<Snapshot>
   checkUpdate(): Promise<string>
+  setShortcutCapture(active: boolean): Promise<boolean>
+  onShortcutCapture(cb: (key: PrimaryShortcut) => void): () => void
+  requestShortcutPermission(): Promise<Snapshot>
   key(action: KeyAction, value?: string): Promise<Snapshot>
   permission(kind: Permission): Promise<Snapshot>
   action(action: Action): Promise<Snapshot>

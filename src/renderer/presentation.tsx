@@ -29,6 +29,15 @@ export function isActive(phase: Phase) {
   return ['recording', 'transcribing', 'cleaning', 'pasting'].includes(phase);
 }
 
+export function shortcutKeys(shortcut: string, isMac: boolean) {
+  const labels: Record<string, string> = {
+    CommandOrControl: isMac ? '⌘' : 'Ctrl', CmdOrCtrl: isMac ? '⌘' : 'Ctrl', Command: '⌘', Cmd: '⌘',
+    Control: 'Ctrl', Shift: 'Shift', Alt: isMac ? '⌥' : 'Alt', Option: '⌥', Super: isMac ? '⌘' : 'Windows',
+    Meta: isMac ? '⌘' : 'Windows', Fn: 'Fn', Windows: 'Windows',
+  };
+  return shortcut.split('+').map((key) => labels[key] || key);
+}
+
 export function errorMessage(error: unknown) {
   return error instanceof Error
     ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')

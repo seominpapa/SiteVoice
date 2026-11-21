@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Action, KeyAction, Settings, Snapshot, State } from '../shared';
 import { Microphone } from './Microphone';
-import { Brand, errorMessage, Icon, isActive, permissionLabel, phaseLabel, VoiceStudio } from './presentation';
+import { Brand, errorMessage, Icon, isActive, permissionLabel, phaseLabel, shortcutKeys, VoiceStudio } from './presentation';
 import { Result } from './Result';
 import { KeyPanel, SettingsFields } from './Settings';
 
@@ -9,11 +9,6 @@ type Page = 'setup' | 'settings' | 'result';
 const pages = [ ['setup', '시작하기'], ['settings', '환경 설정'], ['result', '결과'] ] as const;
 const actionNotice: Partial<Record<Action, string>> = { copyRaw: '원문을 복사했습니다.', copyCleaned: '정리한 문장을 복사했습니다.' };
 const keyNotice: Record<KeyAction, string> = { save: 'API 키를 저장했습니다.', verify: '키가 모델 조회에 사용할 수 있는 상태입니다.', delete: '저장한 API 키를 삭제했습니다.' };
-
-function shortcutKeys(shortcut: string, isMac: boolean) {
-  const labels: Record<string, string> = { CommandOrControl: isMac ? '⌘' : 'Ctrl', CmdOrCtrl: isMac ? '⌘' : 'Ctrl', Command: '⌘', Control: 'Ctrl', Shift: 'Shift', Alt: isMac ? '⌥' : 'Alt', Option: '⌥' };
-  return shortcut.split('+').map((key) => labels[key] || key);
-}
 
 export function Dashboard() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
@@ -51,7 +46,10 @@ export function Dashboard() {
     const refreshPermissions = () => {
       void window.voice.get().then((value) => {
         if (!mounted) return;
-        setSnapshot((current) => current && ({ ...current, microphone: value.microphone, accessibility: value.accessibility }));
+        setSnapshot((current) => current && ({
+          ...current, microphone: value.microphone, accessibility: value.accessibility,
+          shortcutPermission: value.shortcutPermission, shortcutRegistered: value.shortcutRegistered,
+        }));
       }).catch(() => { /* A permission refresh should not cover an existing result or error. */ });
     };
     window.addEventListener('focus', refreshPermissions);
@@ -107,6 +105,11 @@ export function Dashboard() {
   const active = isActive(snapshot.state.phase);
   const warning = snapshot.state.phase === 'idle' ? snapshot.state.message : undefined;
   const shortcuts = shortcutKeys(snapshot.settings.shortcut, mac);
+  const shortcutHelp = !snapshot.keyStored ? '먼저 API 키를 저장해 주세요.'
+    : snapshot.shortcutRegistered ? '전역 단축키를 눌러 녹음을 시작하고 종료하세요.'
+    : mac && snapshot.settings.shortcut === 'Fn' && snapshot.shortcutPermission === 'permission'
+      ? 'Fn을 쓰려면 환경 설정에서 입력 모니터링 권한을 허용해 주세요.'
+      : '전역 단축키가 연결되지 않았습니다. 환경 설정에서 확인해 주세요.';
   const permissionCard = <section className="panel permission" aria-labelledby="target-heading">
     <div className="panel-heading"><span className="panel-icon"><Icon name="shield"/></span><div><h2 id="target-heading">{mac ? '손쉬운 사용 권한' : '자동 입력 권한'}</h2><p>{mac ? '다른 앱의 입력 칸을 확인하고 붙여넣으려면 이 권한이 필요합니다.' : 'Windows가 입력을 허용하는 편집기에만 붙여넣습니다.'}</p></div><span className="status-badge">{permissionLabel[snapshot.accessibility] ?? '확인 필요'}</span></div>
     <div className="button-row"><button type="button" className="button secondary" disabled={busy || active} onClick={() => void perform(() => window.voice.permission('accessibility'))}>{mac ? '권한 확인 · 설정 열기' : '자동 입력 상태 확인'}</button></div>
@@ -128,7 +131,7 @@ export function Dashboard() {
         {(error || notice || warning) && <div className={`notice ${error || (!notice && warning) ? 'inline-error' : ''}`} role={error || (!notice && warning) ? 'alert' : 'status'}>{error || notice || warning}{(error || notice) && <button type="button" className="button icon-button" aria-label="알림 닫기" onClick={() => { setError(''); setNotice(''); }}><Icon name="close" size={16}/></button>}</div>}
         {page === 'setup' && <>
           <header className="hero"><div className="hero-copy"><span className="eyebrow">데스크톱 음성 입력</span><h1>말하면,<br/>문장이 됩니다.</h1><p>전사와 문장 정리를 거쳐<br/>방금 쓰던 곳에 입력합니다.</p></div><VoiceStudio/></header>
-          <div className="start-strip"><div><h2>녹음 준비</h2><p>{!snapshot.keyStored ? '먼저 API 키를 저장해 주세요.' : '전역 단축키를 눌러 녹음을 시작하고 종료하세요.'}</p></div><div className="start-shortcut"><span>전역 단축키</span><div className="keys">{shortcuts.map((item, index) => <kbd key={index}>{item}</kbd>)}</div></div><button type="button" className="button primary" disabled={!snapshot.keyStored || busy || active} onClick={() => act('start')}><Icon name="mic" size={17}/>녹음 시작</button></div>
+          <div className="start-strip"><div><h2>녹음 준비</h2><p>{shortcutHelp}</p></div><div className="start-shortcut"><span>전역 단축키</span><div className="keys">{shortcuts.map((item, index) => <kbd key={index}>{item}</kbd>)}</div></div><button type="button" className="button primary" disabled={!snapshot.keyStored || busy || active} onClick={() => act('start')}><Icon name="mic" size={17}/>녹음 시작</button></div>
           <KeyPanel snapshot={snapshot} busy={busy || active} onKey={key}/>
           <div className="setup-tools">{micro}{permissionCard}</div>
         </>}
@@ -141,7 +144,8 @@ export function Dashboard() {
             </div>
           </section>
           <KeyPanel snapshot={snapshot} busy={busy || active} onKey={key}/>
-          <SettingsFields draft={draft} change={setDraft} shortcutRegistered={snapshot.shortcutRegistered} platform={snapshot.platform}/>
+          <SettingsFields draft={draft} change={setDraft} snapshot={snapshot} disabled={busy || active}
+            onShortcutPermission={() => void perform(() => window.voice.requestShortcutPermission())}/>
           {micro}{permissionCard}
           <div className="settings-save"><p>API 키 변경은 즉시 반영됩니다.</p><button type="button" className="button primary" disabled={busy || active || JSON.stringify(draft) === JSON.stringify(snapshot.settings)} onClick={() => void perform(() => window.voice.save(draft), '환경 설정을 저장했습니다.', true)}>환경 설정 저장<Icon name="arrow" size={16}/></button></div>
         </>}

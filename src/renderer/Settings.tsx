@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { KeyAction, Settings, Snapshot } from '../shared';
 import { Icon } from './presentation';
+import { ShortcutPicker } from './ShortcutPicker';
 
 export function KeyPanel({ snapshot, busy, onKey }: {
   snapshot: Snapshot; busy: boolean; onKey(action: KeyAction, value?: string): Promise<boolean>;
@@ -20,8 +21,8 @@ export function KeyPanel({ snapshot, busy, onKey }: {
   </section>;
 }
 
-export function SettingsFields({ draft, change, shortcutRegistered, platform }: {
-  draft: Settings; change(next: Settings): void; shortcutRegistered: boolean; platform: string;
+export function SettingsFields({ draft, change, snapshot, disabled, onShortcutPermission }: {
+  draft: Settings; change(next: Settings): void; snapshot: Snapshot; disabled: boolean; onShortcutPermission(): void;
 }) {
   const [term, setTerm] = useState('');
   const terms = draft.terms;
@@ -32,9 +33,9 @@ export function SettingsFields({ draft, change, shortcutRegistered, platform }: 
         <label className="field">음성 전사 모델<input value={draft.transcriptionModel} maxLength={128} onChange={(event) => change({ ...draft, transcriptionModel: event.target.value })} spellCheck={false}/></label>
         <label className="field">문장 정리 모델<input value={draft.cleanupModel} maxLength={128} onChange={(event) => change({ ...draft, cleanupModel: event.target.value })} spellCheck={false}/></label>
       </div>
-      <label className="field">전역 단축키<input value={draft.shortcut} maxLength={80} onChange={(event) => change({ ...draft, shortcut: event.target.value })} spellCheck={false} aria-describedby="shortcut-hint"/></label>
-      <small id="shortcut-hint">예: <kbd>CommandOrControl+Shift+Space</kbd> · Mac에서는 Command, Windows에서는 Ctrl이 사용됩니다.</small>
-      {!shortcutRegistered && <p className="inline-error">{platform === 'darwin' ? '시스템 설정과 ' : ''}다른 앱에서 사용하는 단축키와 겹치지 않는지 확인하세요.</p>}
+      <ShortcutPicker value={draft.shortcut} platform={snapshot.platform} status={snapshot.shortcutPermission}
+        registered={snapshot.shortcutRegistered} disabled={disabled} onPermission={onShortcutPermission}
+        onChange={(shortcut) => change({ ...draft, shortcut })}/>
     </section>
     <section className="panel" aria-labelledby="terms-heading">
       <div className="panel-heading"><span className="panel-icon"><Icon name="result"/></span><div><h2 id="terms-heading">개인 용어 사전</h2><p>현장명, 인명, 전문 용어를 전사에 참고합니다.</p></div></div>

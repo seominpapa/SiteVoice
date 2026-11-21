@@ -17,6 +17,9 @@ const bridge: Voice = {
   setTheme: theme => invoke('voice:theme', theme),
   setAutoUpdate: enabled => invoke('voice:auto-update', enabled),
   checkUpdate: () => invoke('voice:check-update'),
+  setShortcutCapture: active => invoke('voice:shortcut-capture', active),
+  onShortcutCapture: cb => subscribe('voice:shortcut-captured', cb),
+  requestShortcutPermission: () => invoke('voice:shortcut-permission'),
   key: (action, value) => invoke('voice:key', action, value),
   permission: kind => invoke('voice:permission', kind),
   action: action => invoke('voice:action', action),
@@ -34,6 +37,6 @@ if (window.location.hash === '#overlay') {
   const { overlayAction, audio, recordingError, onState, onRecording, ready } = bridge
   contextBridge.exposeInMainWorld('voice', { overlayAction, audio, recordingError, onState, onRecording, ready })
 } else {
-  const { get, save, setTheme, setAutoUpdate, checkUpdate, key, permission, action, onState } = bridge
-  contextBridge.exposeInMainWorld('voice', { get, save, setTheme, setAutoUpdate, checkUpdate, key, permission, action, onState })
+  const { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, onState } = bridge
+  contextBridge.exposeInMainWorld('voice', { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, onState })
 }

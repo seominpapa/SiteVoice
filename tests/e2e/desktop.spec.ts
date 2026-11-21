@@ -148,3 +148,47 @@ test('persists appearance and startup update preferences across restarts', async
     await rm(profile, { recursive: true, force: true })
   }
 })
+
+test('records a shortcut by pressing keys, cancels capture and restores the platform default', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'sitevoice-key-picker-'))
+  let app: ElectronApplication | undefined
+  const defaultKey = process.platform === 'darwin' ? 'Fn' : 'Windows'
+  try {
+    app = await launch(profile)
+    let page = await dashboard(app)
+    expect((await page.evaluate(() => window.voice.get())).settings.shortcut).toBe(defaultKey)
+    const settings = () => page.getByRole('button', { name: '환경 설정', exact: true }).click()
+    const picker = () => page.getByRole('button', { name: '단축키 입력', exact: true })
+    const value = () => page.locator('output[data-shortcut]')
+    const save = () => page.getByRole('button', { name: '환경 설정 저장' }).click()
+    await settings()
+    await expect(value()).toHaveAttribute('data-shortcut', defaultKey)
+    await picker().click()
+    await expect(picker()).toHaveAttribute('aria-pressed', 'true')
+    await page.keyboard.press('Escape')
+    await expect(picker()).toHaveAttribute('aria-pressed', 'false')
+    await expect(value()).toHaveAttribute('data-shortcut', defaultKey)
+    await picker().click()
+    await page.keyboard.press('Control+Alt+F9')
+    await expect(value()).toHaveAttribute('data-shortcut', 'Control+Alt+F9')
+    await save()
+    await expect.poll(async () => (await page.evaluate(() => window.voice.get())).settings.shortcut).toBe('Control+Alt+F9')
+    expect((await page.evaluate(() => window.voice.get())).shortcutRegistered).toBe(true)
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await settings()
+    await expect(value()).toHaveAttribute('data-shortcut', 'Control+Alt+F9')
+    await picker().click()
+    await page.keyboard.press('Control+Alt+F9')
+    await expect(picker()).toHaveAttribute('aria-pressed', 'false')
+    await expect(value()).toHaveAttribute('data-shortcut', 'Control+Alt+F9')
+    await page.getByRole('button', { name: '기본값 사용', exact: true }).click()
+    await expect(value()).toHaveAttribute('data-shortcut', defaultKey)
+    await save()
+    await expect.poll(async () => (await page.evaluate(() => window.voice.get())).settings.shortcut).toBe(defaultKey)
+  } finally {
+    await close(app)
+    await rm(profile, { recursive: true, force: true })
+  }
+})

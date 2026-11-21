@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "win_shortcut.hpp"
+
 using Microsoft::WRL::ComPtr;
 using namespace std::chrono_literals;
 
@@ -467,9 +469,91 @@ public:
         return Response("invalid");
     }
 };
+
+constexpr UINT shortcutEvent = WM_APP + 1;
+WindowsKeyTap windowsTap;
+HWND shortcutWindow = nullptr;
+
+bool keyboardOrMouseHeld() {
+    // The low-level hook sees this key down before the async key state changes.
+    for (int key = 1; key < 0xFF; ++key) {
+        if (GetAsyncKeyState(key) & 0x8000) return true;
+    }
+    return false;
 }
 
-int main() {
+bool suppressStart(const KBDLLHOOKSTRUCT& event) {
+    // Balance the reserved dummy key, then release the real Win key so shell chords remain usable.
+    INPUT keys[3]{};
+    for (auto& key : keys) key.type = INPUT_KEYBOARD;
+    keys[0].ki.wVk = keys[1].ki.wVk = 0xFF;
+    keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    keys[2].ki.wVk = static_cast<WORD>(event.vkCode);
+    keys[2].ki.wScan = static_cast<WORD>(event.scanCode);
+    keys[2].ki.dwFlags = KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY;
+    const auto sent = SendInput(ARRAYSIZE(keys), keys, sizeof(INPUT));
+    if (sent == 1) SendInput(1, keys + 1, sizeof(INPUT));
+    return sent == ARRAYSIZE(keys);
+}
+
+LRESULT CALLBACK shortcutKeyboard(int code, WPARAM message, LPARAM data) {
+    if (code != HC_ACTION) return CallNextHookEx(nullptr, code, message, data);
+    const auto& event = *reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
+    const bool win = event.vkCode == VK_LWIN || event.vkCode == VK_RWIN;
+    if ((event.flags & LLKHF_INJECTED) || !win) {
+        windowsTap.interrupt();
+    } else if (event.flags & LLKHF_UP) {
+        if (windowsTap.up(event.vkCode, event.time) && shortcutWindow &&
+            shortcutWindow == GetForegroundWindow() && suppressStart(event)) {
+            PostThreadMessageW(GetCurrentThreadId(), shortcutEvent, 0, 0);
+            return 1;
+        }
+    } else {
+        shortcutWindow = GetForegroundWindow();
+        windowsTap.down(event.vkCode, event.time, keyboardOrMouseHeld());
+    }
+    return CallNextHookEx(nullptr, code, message, data);
+}
+
+LRESULT CALLBACK shortcutMouse(int code, WPARAM message, LPARAM data) {
+    if (code == HC_ACTION && message != WM_MOUSEMOVE) windowsTap.interrupt();
+    return CallNextHookEx(nullptr, code, message, data);
+}
+
+int watchShortcut() {
+    const auto module = GetModuleHandleW(nullptr);
+    const auto keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, shortcutKeyboard, module, 0);
+    const auto mouse = keyboard ? SetWindowsHookExW(WH_MOUSE_LL, shortcutMouse, module, 0) : nullptr;
+    if (!keyboard || !mouse) {
+        const DWORD error = GetLastError();
+        if (keyboard) UnhookWindowsHookEx(keyboard);
+        std::cout << (error == ERROR_ACCESS_DENIED ? "PERMISSION" : "UNAVAILABLE") << std::endl;
+        return 1;
+    }
+
+    std::atomic_bool eof = false;
+    std::thread reader([&] {
+        while (std::cin.get() != std::char_traits<char>::eof()) {}
+        eof = true;
+    });
+    std::cout << "READY" << std::endl;
+    while (!eof) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
+        MSG message{};
+        while (!eof && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == shortcutEvent) std::cout << "TRIGGER" << std::endl;
+            else DispatchMessageW(&message);
+        }
+    }
+    UnhookWindowsHookEx(mouse);
+    UnhookWindowsHookEx(keyboard);
+    reader.join();
+    return 0;
+}
+}
+
+int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string_view(argv[1]) == "--shortcut") return watchShortcut();
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(initialized)) return 1;
     {

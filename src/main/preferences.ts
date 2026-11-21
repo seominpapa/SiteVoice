@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, validateSettings } from '../core/validation.ts'
+import { migrateShortcut } from '../core/shortcuts.ts'
 import type { Theme } from '../shared.ts'
 import { codeIs, writeAtomic } from './vault.ts'
 
@@ -11,9 +12,9 @@ export function createPreferences(directory: string) {
       try {
         const value = await readFile(path, 'utf8')
         if (value.length > 64 * 1024) throw new Error()
-        const { theme, autoUpdate, ...settings } = JSON.parse(value)
+        const { theme, autoUpdate, shortcutVersion, ...settings } = JSON.parse(value)
         return {
-          settings: validateSettings(settings),
+          settings: validateSettings({ ...settings, shortcut: migrateShortcut(settings.shortcut, shortcutVersion, process.platform) }),
           theme: theme === 'dark' ? 'dark' as const : 'light' as const,
           autoUpdate: autoUpdate !== false
         }
@@ -27,7 +28,7 @@ export function createPreferences(directory: string) {
       }
     },
     async write(value: ReturnType<typeof validateSettings>, theme: Theme, autoUpdate: boolean) {
-      try { await writeAtomic(path, JSON.stringify({ ...value, theme, autoUpdate }, null, 2) + '\n') }
+      try { await writeAtomic(path, JSON.stringify({ ...value, theme, autoUpdate, shortcutVersion: 1 }, null, 2) + '\n') }
       catch { throw new Error('설정 파일에 저장할 수 없습니다.') }
     }
   }

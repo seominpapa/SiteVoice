@@ -224,7 +224,144 @@ private final class Bridge {
     }
 }
 
-if CommandLine.arguments.dropFirst().elementsEqual(["--test-pasteboard"]) {
+private struct FnTap {
+    private var started: CGEventTimestamp?
+    private var held = false
+    private let maxDuration: CGEventTimestamp = 450_000_000
+
+    mutating func interrupt() { started = nil }
+
+    mutating func reset(held: Bool) {
+        self.held = held
+        interrupt()
+    }
+
+    mutating func edge(down: Bool, time: CGEventTimestamp, alone: Bool, physical: Bool) -> Bool {
+        guard physical else { interrupt(); return false }
+        if down {
+            started = !held && alone ? time : nil
+            held = true
+            return false
+        }
+        defer { reset(held: false) }
+        guard alone, let started, time >= started else { return false }
+        return time - started <= maxDuration
+    }
+}
+
+private func shortcutOutput(_ status: String) {
+    FileHandle.standardOutput.write(Data((status + "\n").utf8))
+}
+
+private final class ShortcutMonitor {
+    private var gesture = FnTap()
+    private var tap: CFMachPort?
+    private let functionKey = CGKeyCode(kVK_Function)
+
+    func start() -> String {
+        guard CGPreflightListenEventAccess() else { return "PERMISSION" }
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        let mediaMask = CGEventMask(1) << NSEvent.EventType.systemDefined.rawValue
+        let mask = types.reduce(mediaMask) { $0 | (CGEventMask(1) << $1.rawValue) }
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
+                                           eventsOfInterest: mask, callback: { _, type, event, context in
+            if let context {
+                Unmanaged<ShortcutMonitor>.fromOpaque(context).takeUnretainedValue().observe(type, event)
+            }
+            return Unmanaged.passUnretained(event)
+        }, userInfo: Unmanaged.passUnretained(self).toOpaque()),
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else { return "UNAVAILABLE" }
+        tap = port
+        reset()
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: port, enable: true)
+        return "READY"
+    }
+
+    func reset() {
+        gesture.reset(held: CGEventSource.flagsState(.hidSystemState).contains(.maskSecondaryFn))
+    }
+
+    func stop() {
+        if let tap { CFMachPortInvalidate(tap) }
+    }
+
+    private func observe(_ type: CGEventType, _ event: CGEvent) {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            reset()
+            if !CGPreflightListenEventAccess() {
+                shortcutOutput("PERMISSION")
+                CFRunLoopStop(CFRunLoopGetMain())
+            } else if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return
+        }
+        guard type == .flagsChanged,
+              event.getIntegerValueField(.keyboardEventKeycode) == Int64(functionKey) else { gesture.interrupt(); return }
+        // Quartz exposes the logical Fn/Globe key, and cannot identify a remapped physical key.
+        let physical = event.getIntegerValueField(.eventSourceUnixProcessID) == 0
+        let down = event.flags.contains(.maskSecondaryFn)
+        let noModifiers = event.flags.intersection(modifiers).isEmpty
+        let alone = physical && noModifiers && !IsSecureEventInputEnabled() && (!down || !(0..<128).contains {
+            let key = CGKeyCode($0)
+            return key != functionKey && key != CGKeyCode(kVK_CapsLock) && CGEventSource.keyState(.hidSystemState, key: key)
+        })
+        if gesture.edge(down: down, time: event.timestamp, alone: alone, physical: physical) { shortcutOutput("TRIGGER") }
+    }
+}
+
+private func runShortcutMonitor() {
+    let listener = ShortcutMonitor()
+    let status = listener.start()
+    shortcutOutput(status)
+    guard status == "READY" else { return }
+    let center = NSWorkspace.shared.notificationCenter
+    let observers = [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.didWakeNotification].map { event in
+        center.addObserver(forName: event, object: nil, queue: .main) { _ in listener.reset() }
+    }
+    defer {
+        listener.stop()
+        observers.forEach(center.removeObserver)
+    }
+    DispatchQueue.global().async {
+        while readLine() != nil {}
+        DispatchQueue.main.async { CFRunLoopStop(CFRunLoopGetMain()) }
+    }
+    CFRunLoopRun()
+}
+
+private func testShortcut() {
+    var tap = FnTap()
+    func edge(_ down: Bool, _ ms: UInt64, alone: Bool = true, physical: Bool = true) -> Bool {
+        tap.edge(down: down, time: ms * 1_000_000, alone: alone, physical: physical)
+    }
+    tap.reset(held: true)
+    precondition(!edge(true, 10) && !edge(false, 12)) // Startup while held.
+    precondition(!edge(true, 21) && edge(false, 130))
+    precondition(!edge(true, 200) && !edge(false, 651))
+    precondition(!edge(true, 700, alone: false) && !edge(false, 750))
+    precondition(!edge(true, 800) && !edge(true, 810) && !edge(true, 820) && !edge(false, 850))
+    precondition(!edge(true, 900) && !edge(false, 950, alone: false))
+    precondition(!edge(true, 1000))
+    tap.interrupt() // An unrelated keyboard event.
+    precondition(!edge(true, 1050) && !edge(false, 1090))
+    precondition(!edge(true, 1110) && !edge(false, 1109))
+    precondition(!edge(true, 1200, physical: false) && !edge(false, 1250))
+    precondition(!edge(true, 1300) && !edge(false, 1330, physical: false) && !edge(false, 1350))
+    precondition(!edge(true, 1400) && edge(false, 1440))
+    shortcutOutput("ok")
+}
+
+let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments == ["--shortcut"] {
+    runShortcutMonitor()
+} else if arguments == ["--request-shortcut-permission"] {
+    shortcutOutput(CGPreflightListenEventAccess() || CGRequestListenEventAccess() ? "READY" : "PERMISSION")
+} else if arguments == ["--test-shortcut"] {
+    testShortcut()
+} else if arguments == ["--test-pasteboard"] {
     let board = NSPasteboard.withUniqueName()
     defer { board.releaseGlobally() }
     let type = NSPasteboard.PasteboardType("voiceinput.test")
