@@ -9,6 +9,16 @@ if (!((platform === 'mac' && process.platform === 'darwin' && ['arm64', 'x64'].i
 }
 const developerId = process.env.VOICEINPUT_SIGNING === '1'
 const configuredFeed = process.env.VOICEINPUT_UPDATE_URL
+const githubUpdates = process.env.VOICEINPUT_GITHUB_UPDATES === '1'
+const localUpdateTest = process.env.VOICEINPUT_LOCAL_UPDATE_TEST === '1'
+if (githubUpdates && (configuredFeed || platform !== 'mac' || arch !== 'arm64')) {
+  throw new Error('SiteVoice GitHub 업데이트 빌드는 별도 HTTPS 피드를 지정하지 않은 Apple Silicon용으로만 만드세요.')
+}
+if (localUpdateTest && !githubUpdates) throw new Error('로컬 업데이트 테스트는 SiteVoice GitHub 업데이트 빌드에만 적용됩니다.')
+if (githubUpdates && !developerId) throw new Error('GitHub 업데이트 배포에는 VOICEINPUT_SIGNING=1이 필요합니다.')
+if (githubUpdates && !localUpdateTest && !process.env.APPLE_KEYCHAIN_PROFILE) {
+  throw new Error('GitHub 배포용 macOS 빌드에는 공증용 APPLE_KEYCHAIN_PROFILE 설정이 필요합니다.')
+}
 let updateUrl
 if (configuredFeed) {
   if (platform !== 'mac') throw new Error('Windows에서는 앱 내 업데이트를 지원하지 않습니다. 일반 NSIS 설치 파일을 사용하세요.')
@@ -21,6 +31,12 @@ if (configuredFeed) {
   base.pathname = base.pathname.replace(/\/$/, '') + '/' + platform + '/' + arch + '/'
   updateUrl = base.href
 }
+const publication = githubUpdates
+  ? { provider: 'github', owner: 'seominpapa', repo: 'SiteVoice', private: true }
+  : updateUrl ? { provider: 'generic', url: updateUrl } : null
+const output = githubUpdates
+  ? `release/${localUpdateTest ? 'github-local-test' : 'github'}/mac-${arch}`
+  : updateUrl ? `release/update/${platform}-${arch}` : 'release'
 let verifiedMacSignature = false
 // npm invokes this script with its own environment. No shell interpolation or publisher.
 execFileSync(process.execPath, ['native/build.mjs', arch], { stdio: 'inherit' })
@@ -32,7 +48,7 @@ if (platform === 'mac' && !developerId) {
 }
 await build({
   targets: (platform === 'mac' ? Platform.MAC : Platform.WINDOWS)
-    .createTarget(platform === 'mac' ? updateUrl ? ['dmg', 'zip'] : ['dmg'] : ['nsis'], Arch[arch]),
+    .createTarget(platform === 'mac' ? publication ? ['dmg', 'zip'] : ['dmg'] : ['nsis'], Arch[arch]),
   publish: 'never',
   config: {
     appId: 'com.voiceinput.desktop',
@@ -44,13 +60,15 @@ await build({
       enableEmbeddedAsarIntegrityValidation: true,
       onlyLoadAppFromAsar: true
     },
-    directories: { output: updateUrl ? 'release/update/' + platform + '-' + arch : 'release', buildResources: 'build' },
-    forceCodeSigning: Boolean(updateUrl),
-    ...(updateUrl ? {
+    directories: { output, buildResources: 'build' },
+    forceCodeSigning: Boolean(publication),
+    ...(publication ? {
       afterSign({ appOutDir, packager }) {
-        execFileSync('codesign', ['--verify', '--strict',
-          '-R=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists',
-          join(appOutDir, packager.appInfo.productFilename + '.app')])
+        const app = join(appOutDir, packager.appInfo.productFilename + '.app')
+        const developerRequirement = 'anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+        const requirement = githubUpdates ? developerRequirement + ' and certificate leaf[subject.OU] = "6564NK7Q97"' : developerRequirement
+        execFileSync('codesign', ['--verify', '--strict', `-R=${requirement}`, app])
+        if (githubUpdates && !localUpdateTest) execFileSync('xcrun', ['stapler', 'validate', app], { stdio: 'inherit' })
         verifiedMacSignature = true
       }
     } : {}),
@@ -60,14 +78,14 @@ await build({
       { from: 'native/bin/' + process.platform + '-' + arch, to: 'targets/' + process.platform + '-' + arch, filter: ['voice-target', 'voice-target.exe'] },
       { from: 'build', to: 'build', filter: ['tray*.png'] }
     ],
-    publish: updateUrl ? { provider: 'generic', url: updateUrl } : null,
+    publish: publication,
     npmRebuild: false,
     mac: {
       category: 'public.app-category.productivity',
       icon: 'build/icon.png',
       identity: developerId ? undefined : '-',
       hardenedRuntime: developerId,
-      notarize: developerId,
+      notarize: developerId && !localUpdateTest,
       minimumSystemVersion: arch === 'x64' ? '14.0' : '13.0',
       binaries: ['Contents/Resources/targets/darwin-' + arch + '/voice-target'],
       entitlements: 'build/entitlements.mac.plist',
@@ -78,6 +96,6 @@ await build({
     nsis: { oneClick: false, perMachine: false, allowElevation: false, allowToChangeInstallationDirectory: true }
   }
 })
-if (updateUrl && !verifiedMacSignature) {
+if (publication && !verifiedMacSignature) {
   throw new Error('업데이트용 앱의 Developer ID Application 서명을 확인하지 못했습니다.')
 }

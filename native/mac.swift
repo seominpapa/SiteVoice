@@ -6,15 +6,37 @@ private let maxTextBytes = 512 * 1024
 private let maxClipboardBytes = 32 * 1024 * 1024
 private let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
 
-private func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+private typealias AttributeRead = (status: AXError, value: CFTypeRef?)
+
+private func readAttribute(_ e: AXUIElement, _ name: String) -> AttributeRead {
     var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(e, name as CFString, &value) == .success else { return nil }
-    return value
+    let status = AXUIElementCopyAttributeValue(e, name as CFString, &value)
+    return (status, status == .success ? value : nil)
 }
 
 private func element(_ e: AXUIElement, _ name: String) -> AXUIElement? {
-    guard let value = attribute(e, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    guard let value = readAttribute(e, name).value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return unsafeBitCast(value, to: AXUIElement.self)
+}
+
+private func acceptsFocusedEditor(read: (String) -> AttributeRead, isValueWritable: () -> Bool) -> Bool {
+    guard let role = read(kAXRoleAttribute).value as? String,
+          [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role),
+          read(kAXSubroleAttribute).value as? String != kAXSecureTextFieldSubrole,
+          read("AXProtectedContent").value as? Bool != true else { return false }
+
+    let enabled = read(kAXEnabledAttribute)
+    // Native text views such as TextEdit may omit AXEnabled even while accepting input.
+    // Missing support is safe to consider only with separate proof of editability and a caret.
+    guard enabled.status == .attributeUnsupported ||
+          (enabled.status == .success && enabled.value as? Bool == true),
+          isValueWritable() || read("AXEditable").value as? Bool == true,
+          let selection = read(kAXSelectedTextRangeAttribute).value,
+          CFGetTypeID(selection) == AXValueGetTypeID() else { return false }
+
+    var range = CFRange()
+    return AXValueGetValue(unsafeBitCast(selection, to: AXValue.self), .cfRange, &range)
+        && range.location >= 0 && range.length == 0
 }
 
 private struct Target {
@@ -32,23 +54,12 @@ private struct Target {
         guard AXUIElementSetMessagingTimeout(app, 0.12) == .success,
               let window = element(app, kAXFocusedWindowAttribute),
               let focus = element(app, kAXFocusedUIElementAttribute),
-              AXUIElementSetMessagingTimeout(focus, 0.12) == .success,
-              let role = attribute(focus, kAXRoleAttribute) as? String,
-              [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role),
-              attribute(focus, kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole,
-              attribute(focus, "AXProtectedContent") as? Bool != true,
-              attribute(focus, kAXEnabledAttribute) as? Bool == true else { return nil }
-
-        var settable = DarwinBoolean(false)
-        let editable = AXUIElementIsAttributeSettable(focus, kAXValueAttribute as CFString, &settable) == .success
-            && settable.boolValue
-        guard editable || attribute(focus, "AXEditable") as? Bool == true else { return nil }
-        guard let selection = attribute(focus, kAXSelectedTextRangeAttribute),
-              CFGetTypeID(selection) == AXValueGetTypeID() else { return nil }
-        let selected = unsafeBitCast(selection, to: AXValue.self)
-        var range = CFRange()
-        guard AXValueGetValue(selected, .cfRange, &range),
-              range.location >= 0, range.length == 0 else { return nil }
+              AXUIElementSetMessagingTimeout(focus, 0.12) == .success else { return nil }
+        guard acceptsFocusedEditor(read: { readAttribute(focus, $0) }, isValueWritable: {
+            var settable = DarwinBoolean(false)
+            return AXUIElementIsAttributeSettable(focus, kAXValueAttribute as CFString, &settable) == .success
+                && settable.boolValue
+        }) else { return nil }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
         return Target(pid: pid, app: app, window: window, focus: focus)
     }
@@ -354,6 +365,38 @@ private func testShortcut() {
     shortcutOutput("ok")
 }
 
+private func testEditorTarget() {
+    var insertionRange = CFRange(location: 0, length: 0)
+    var selectedRange = CFRange(location: 0, length: 3)
+    let caret = AXValueCreate(.cfRange, &insertionRange)!
+    let selection = AXValueCreate(.cfRange, &selectedRange)!
+    func eligible(role: String = kAXTextAreaRole, subrole: String? = nil, protectedContent: Bool = false,
+                  enabled: AttributeRead = (.attributeUnsupported, nil), writable: Bool = true,
+                  range: CFTypeRef? = caret) -> Bool {
+        acceptsFocusedEditor(read: { name in
+            switch name {
+            case kAXRoleAttribute: return (.success, role as CFString)
+            case kAXSubroleAttribute: return subrole.map { (.success, $0 as CFString) } ?? (.noValue, nil)
+            case "AXProtectedContent": return (.success, protectedContent ? kCFBooleanTrue : kCFBooleanFalse)
+            case kAXEnabledAttribute: return enabled
+            case kAXSelectedTextRangeAttribute: return range.map { (.success, $0) } ?? (.noValue, nil)
+            default: return (.attributeUnsupported, nil)
+            }
+        }, isValueWritable: { writable })
+    }
+    precondition(eligible()) // The native TextEdit editor exposes no AXEnabled attribute.
+    precondition(eligible(enabled: (.success, kCFBooleanTrue))) // Existing browser editor path.
+    precondition(!eligible(enabled: (.success, kCFBooleanFalse)))
+    precondition(!eligible(enabled: (.cannotComplete, nil)))
+    precondition(!eligible(enabled: (.noValue, nil)))
+    precondition(!eligible(writable: false))
+    precondition(!eligible(range: selection) && !eligible(range: nil))
+    precondition(!eligible(role: kAXStaticTextRole))
+    precondition(!eligible(role: kAXTextFieldRole, subrole: kAXSecureTextFieldSubrole))
+    precondition(!eligible(protectedContent: true))
+    shortcutOutput("ok")
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments == ["--shortcut"] {
     runShortcutMonitor()
@@ -361,6 +404,8 @@ if arguments == ["--shortcut"] {
     shortcutOutput(CGPreflightListenEventAccess() || CGRequestListenEventAccess() ? "READY" : "PERMISSION")
 } else if arguments == ["--test-shortcut"] {
     testShortcut()
+} else if arguments == ["--test-editor-target"] {
+    testEditorTarget()
 } else if arguments == ["--test-pasteboard"] {
     let board = NSPasteboard.withUniqueName()
     defer { board.releaseGlobally() }

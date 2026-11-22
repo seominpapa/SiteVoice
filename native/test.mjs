@@ -17,3 +17,7 @@ test('helper never dispatches without a valid, unconsumed target snapshot', () =
 test('a newer clipboard owner wins; supported representations are preserved', { skip: process.platform !== 'darwin' }, () => {
   assert.equal(execFileSync(helper, ['--test-pasteboard'], { encoding: 'utf8', timeout: 5000 }).trim(), 'ok')
 })
+
+test('macOS accepts a writable editor without AXEnabled and rejects unsafe targets', { skip: process.platform !== 'darwin' }, () => {
+  assert.equal(execFileSync(helper, ['--test-editor-target'], { encoding: 'utf8', timeout: 5000 }).trim(), 'ok')
+})

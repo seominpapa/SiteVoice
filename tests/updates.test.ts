@@ -3,13 +3,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { createUpdateController, hasSupportedFeed, type UpdateDriver } from '../src/main/updates.ts'
+import { configureUpdateFeed, createUpdateController, hasSupportedFeed, type UpdateDriver } from '../src/main/updates.ts'
 
 async function fixture(run: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), 'voiceinput-updates-'))
   try { await run(dir) } finally { await rm(dir, { recursive: true, force: true }) }
 }
 const manifest = 'provider: generic\nurl: https://updates.example.com/mac/arm64/\nupdaterCacheDirName: voiceinput-updater\n'
+const privateManifest = 'provider: github\nowner: seominpapa\nrepo: SiteVoice\nprivate: true\nupdaterCacheDirName: voiceinput-updater\n'
 const update = { isUpdateAvailable: true, updateInfo: { version: '0.3.0' } }
 
 test('does not load the updater in development or without HTTPS distribution metadata', async () => fixture(async dir => {
@@ -42,6 +43,55 @@ test('does not enable in-app updates on Windows or Linux', async () => fixture(a
   await writeFile(file, manifest)
   assert.equal(hasSupportedFeed(true, dir, 'win32'), false)
   assert.equal(hasSupportedFeed(true, dir, 'linux'), false)
+}))
+
+test('only the packaged SiteVoice repository is accepted as a private GitHub feed', async () => fixture(async dir => {
+  const file = join(dir, 'app-update.yml')
+  await writeFile(file, privateManifest)
+  assert.equal(hasSupportedFeed(true, dir, 'darwin'), true)
+  for (const unsafe of [
+    privateManifest.replace('seominpapa', 'unknown-owner'),
+    privateManifest.replace('SiteVoice', 'other-project'),
+    privateManifest.replace('private: true', 'private: false'),
+    privateManifest.replace('voiceinput-updater', '../../elsewhere'),
+    privateManifest + 'host: example.com\n',
+    privateManifest + 'token: credentials\n',
+    privateManifest + 'owner: unknown-owner\n'
+  ]) {
+    await writeFile(file, unsafe)
+    assert.equal(hasSupportedFeed(true, dir, 'darwin'), false)
+  }
+}))
+
+test('private GitHub uses local authentication before any request and keeps the install confirmation', async () => fixture(async dir => {
+  await writeFile(join(dir, 'app-update.yml'), privateManifest)
+  const events: Array<unknown> = []
+  let localToken: string | null = null
+  const updater = {
+    disableDifferentialDownload: false,
+    setFeedURL: (options: unknown) => { events.push(options) }
+  }
+  const controller = createUpdateController({
+    resourcesPath: dir, platform: 'darwin', isPackaged: true, canInterrupt: () => true,
+    confirm: async version => { events.push('prompt ' + version); return false },
+    load: feed => ({
+      checkForUpdates: async () => {
+        await configureUpdateFeed(updater, feed, async () => localToken)
+        events.push('check')
+        return update
+      },
+      async downloadUpdate() { assert.fail('download without confirmation') },
+      async install() { assert.fail('install without confirmation') }
+    })
+  })
+  assert.match(await controller.check(), /gh auth login/)
+  localToken = 'invalid credential\n'
+  assert.match(await controller.check(), /gh auth login/)
+  assert.deepEqual(events, [])
+  localToken = 'test_token_sitevoice_local_only'
+  assert.match(await controller.check(), /나중에/)
+  assert.deepEqual(events, [{ provider: 'github', owner: 'seominpapa', repo: 'SiteVoice', token: localToken }, 'check', 'prompt 0.3.0'])
+  assert.equal(updater.disableDifferentialDownload, true)
 }))
 
 test('only an approved newer version downloads and installs; overlapping calls cannot repeat it', async () => fixture(async dir => {
