@@ -1,0 +1,124 @@
+name: Build Windows release installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag matching package.json (for example, v0.2.7)
+        required: true
+        type: string
+
+concurrency:
+  group: windows-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    env:
+      SITEVOICE_TAG: ${{ inputs.release_tag }}
+      GH_PROMPT_DISABLED: '1'
+    steps:
+      - name: Check out source without persisting credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Confirm the target release matches the app version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:SITEVOICE_TAG -cne "v$version") {
+            throw 'The release tag must match the app version.'
+          }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:SITEVOICE_TAG" |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$release -or $release.draft -or $release.prerelease -or $release.immutable) {
+            throw 'The target must be an existing, published stable release that accepts new files.'
+          }
+          $installerName = "SiteVoice-$version-win-x64.exe"
+          if ($release.assets.name -contains $installerName) { throw 'The installer already exists.' }
+          "SITEVOICE_INSTALLER=release/$installerName" >> $env:GITHUB_ENV
+
+      - name: Install dependencies and test application code
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+
+      - name: Build Windows x64 installer with MSVC
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Could not find the x64 Visual Studio C++ tools.' }
+          $build = Join-Path $env:RUNNER_TEMP 'build-sitevoice.cmd'
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          call npm run package:win
+          if errorlevel 1 exit /b 1
+          node --test native/test.mjs
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-shortcut.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
+          "@ | Set-Content -LiteralPath $build -Encoding ascii
+          & $build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify install, launch, native helper, and uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
+          $dest = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmoke'
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)." }
+          $app = Get-Item -LiteralPath (Join-Path $dest 'SiteVoice.exe')
+          $helper = Get-Item -LiteralPath (Join-Path $dest 'resources\targets\win32-x64\voice-target.exe')
+          if ((Get-FileHash -LiteralPath $helper.FullName).Hash -ne
+              (Get-FileHash -LiteralPath 'native/bin/win32-x64/voice-target.exe').Hash) {
+            throw 'Installed helper differs from the tested executable.'
+          }
+          $profile = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmokeProfile'
+          $process = Start-Process -FilePath $app.FullName -ArgumentList "--user-data-dir=`"$profile`"" -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) { throw "SiteVoice could not stay running: $($process.ExitCode)." }
+          } finally {
+            if (!$process.HasExited) { Stop-Process -Id $process.Id }
+          }
+          $uninstaller = Get-Item -LiteralPath (Join-Path $dest 'Uninstall SiteVoice.exe')
+          $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($remove.ExitCode -ne 0 -or (Test-Path -LiteralPath $app.FullName)) { throw 'Uninstall failed.' }
+          Get-AuthenticodeSignature -LiteralPath $installer.FullName | Select-Object Status
+
+      - name: Add the verified installer to the existing release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          gh release upload $env:SITEVOICE_TAG $installer.FullName --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:SITEVOICE_TAG" | ConvertFrom-Json
+          $asset = $release.assets | Where-Object name -CEQ $installer.Name
+          if ($LASTEXITCODE -ne 0 -or $asset.state -ne 'uploaded' -or $asset.size -ne $installer.Length -or $asset.digest -cne "sha256:$hash") {
+            throw 'Published installer does not match the tested file.'
+          }
+          Write-Output "Verified $($asset.name) (SHA-256: $hash)."
