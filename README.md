@@ -2,6 +2,15 @@
 
 다른 앱에서 단축키를 눌러 말을 받아쓰고, 번복과 반복, 군더더기만 정리해 원래 입력 칸에 붙여넣는 한국어 데스크톱 앱입니다. **받아쓴 결과**에는 녹음한 날짜·시간과 실제로 입력하거나 복사할 문장만 표시합니다. 번역이나 내용 축약은 하지 않습니다.
 
+## 다운로드
+
+| 운영체제 | SiteVoice 0.2.7 설치 파일 | 설치 방법 |
+| --- | --- | --- |
+| Mac · Apple Silicon | [Mac용 DMG 다운로드](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.7/SiteVoice-0.2.7-mac-arm64.dmg) | DMG를 열고 SiteVoice를 응용 프로그램 폴더에 옮깁니다. |
+| Windows · x64 | [Windows용 EXE 다운로드](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.7/SiteVoice-0.2.7-win-x64.exe) | EXE를 실행하고 설치 안내를 따릅니다. |
+
+[GitHub 릴리스 목록](https://github.com/seominpapa/SiteVoice/releases)에서 다른 버전도 확인할 수 있습니다. 이 저장소는 비공개이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 내려받을 수 있습니다. Windows 설치 파일에는 디지털 서명이 없습니다.
+
 ## 데스크톱 앱으로 만든 이유
 
 브라우저에서도 페이지 안에서 녹음하고, 음성을 글로 바꾼 뒤 복사할 수 있습니다. 하지만 다른 앱을 쓰는 동안 `Fn`이나 Windows 로고 키를 전역 단축키로 감지하거나, 그 앱의 입력 칸을 확인해 커서 위치에 자동으로 붙여넣는 기능은 브라우저만으로 제공할 수 없습니다. SiteVoice는 이 기능에 운영체제의 기능을 사용하는 데스크톱 앱입니다. 브라우저용 빌드나 `.command` 실행 파일은 제공하지 않습니다.
@@ -77,6 +86,8 @@ Electron E2E는 실행 중인 데스크톱 세션을 사용합니다. 임시 프
 **환경 설정 → 앱 업데이트**에서 시작 시 자동 확인을 켜거나 끌 수 있습니다. 자동 확인을 켜면 다음 실행 때 새 버전을 확인합니다. 새 버전이 있을 때만 설치 여부를 묻고, **업데이트 설치**를 선택한 경우 내려받아 적용합니다.
 
 SiteVoice의 Apple Silicon 배포본은 비공개 GitHub 릴리스에서 업데이트를 받습니다. 이 기능을 사용하려면 해당 저장소에 접근할 수 있는 계정으로 이 Mac의 GitHub CLI(`gh`)에 로그인해 두세요. 업데이트 기능이 없던 이전 설치본은 새 설치본으로 한 번 교체해야 합니다. 업데이트할 때는 응용 프로그램 폴더에 설치한 SiteVoice를 사용하세요.
+
+Windows에서는 새 버전의 EXE를 GitHub 릴리스에서 내려받아 설치합니다.
 
 이 저장소의 Apple Silicon 배포 파일은 아래 명령으로 만듭니다. Apple 공증 프로필과 같은 Apple 개발자 팀의 Developer ID Application 인증서가 필요합니다. 생성된 `latest-mac.yml`, ZIP·DMG와 관련 블록맵은 같은 GitHub 릴리스에 올립니다.
 
