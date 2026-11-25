@@ -1,12 +1,12 @@
 import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const fakeKey = 'sk-local-testing-00000000000000000000'
-function launch(profile: string) {
+function launch(profile: string, appPath = process.cwd()) {
   return electron.launch({
-    args: [process.cwd(), '--user-data-dir=' + profile, '--use-fake-device-for-media-stream']
+    args: [appPath, '--user-data-dir=' + profile, '--use-fake-device-for-media-stream']
   })
 }
 async function dashboard(app: ElectronApplication) {
@@ -150,6 +150,69 @@ test('records with fake device, offers copy fallback, and keeps results after re
   } finally {
     await close(app)
     await rm(profile, { recursive: true, force: true })
+  }
+})
+
+test('hides successful completion promptly and still saves the result', async () => {
+  test.skip(process.platform !== 'darwin', 'macOS helper fixture')
+  const fixture = await mkdtemp(join(tmpdir(), 'sitevoice-completion-'))
+  let app: ElectronApplication | undefined
+  try {
+    await Promise.all(['package.json', 'dist', 'build'].map(item =>
+      cp(join(process.cwd(), item), join(fixture, item), { recursive: true })))
+    await symlink(join(process.cwd(), 'node_modules'), join(fixture, 'node_modules'), 'dir')
+    const helper = join(fixture, 'native', 'bin', `darwin-${process.arch}`)
+    const trigger = join(fixture, 'trigger')
+    await mkdir(helper, { recursive: true })
+    await writeFile(trigger, '')
+    // Keep real shortcuts, clipboard writes and AX events out of this test.
+    await writeFile(join(helper, 'voice-target'), `#!/usr/bin/env node
+import { watchFile, unwatchFile } from 'node:fs'
+import { createInterface } from 'node:readline'
+const input = createInterface({ input: process.stdin })
+const trigger = ${JSON.stringify(trigger)}
+if (process.argv.includes('--shortcut')) {
+  watchFile(trigger, { interval: 25 }, () => console.log('TRIGGER'))
+  input.on('close', () => unwatchFile(trigger))
+  console.log('READY')
+} else {
+  input.on('line', line => console.log(JSON.stringify({ ok: /^(PERMISSION|SNAPSHOT|RESET|PASTE .+)$/.test(line) })))
+}
+`, { mode: 0o700 })
+    app = await launch(join(fixture, 'profile'), fixture)
+    const page = await dashboard(app)
+    const sentence = '도면을 오늘 검토합니다.'
+    await app.evaluate(({ systemPreferences }, text) => {
+      Object.defineProperty(systemPreferences, 'getMediaAccessStatus', { configurable: true, value: () => 'granted' })
+      globalThis.fetch = async input => {
+        const path = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).pathname
+        if (path.endsWith('/audio/transcriptions')) return Response.json({ text })
+        if (path.endsWith('/responses')) return Response.json({
+          status: 'completed', output: [{ type: 'message', role: 'assistant', status: 'completed', content: [
+            { type: 'output_text', text: JSON.stringify({ text }) }
+          ] }]
+        })
+        throw new Error('Unexpected remote request blocked by the test')
+      }
+    }, sentence)
+    await page.getByLabel('OpenAI API 키', { exact: true }).fill(fakeKey)
+    await page.getByRole('button', { name: '키 저장', exact: true }).click()
+    await expect.poll(async () => (await page.evaluate(() => window.voice.get()))).toMatchObject({
+      keyStored: true, accessibility: 'granted', shortcutPermission: 'ready'
+    })
+    const overlay = app.windows().find(win => win.url().endsWith('#overlay'))!
+    const overlayWindow = await app.browserWindow(overlay)
+    await (await app.browserWindow(page)).evaluate(window => window.hide())
+    await writeFile(trigger, 'start')
+    await expect(overlay.getByRole('button', { name: '녹음 종료' })).toBeEnabled()
+    await overlay.waitForTimeout(1100) // Collect audio chunks from the fake microphone.
+    await overlay.getByRole('button', { name: '녹음 종료' }).click()
+    await expect(overlay.getByRole('status')).toHaveText('처리 완료')
+    await expect.poll(() => overlayWindow.evaluate(window => window.isVisible()), { timeout: 1200 }).toBe(false)
+    await expect.poll(async () => (await page.evaluate(() => window.voice.get())).history[0]?.text).toBe(sentence)
+  } finally {
+    await close(app)
+    await rm(fixture, { recursive: true, force: true })
   }
 })
 

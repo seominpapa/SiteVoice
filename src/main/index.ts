@@ -17,6 +17,7 @@ import { createWindows, dashboardColor } from './windows.ts'
 import { createUpdateController } from './updates.ts'
 
 const running = new Set(['recording', 'transcribing', 'cleaning', 'pasting'])
+const completedOverlayMs = 450
 const recorderErrors = {
   permission: '마이크 접근이 거부되었습니다. 환경 설정에서 권한을 확인해 주세요.',
   device: '녹음 중 마이크 연결이 끊겼습니다. 연결을 확인하고 다시 시도해 주세요.',
@@ -237,7 +238,10 @@ async function startApp() {
       }
       if (phase === 'failed' && !windows.dashboard.isVisible()) windows.dashboard.showInactive()
       clearTimeout(hideTimer)
-      if (!overlayResult(state)) hideTimer = setTimeout(() => windows.overlay.hide(), phase === 'idle' ? 0 : 2500)
+      if (!overlayResult(state)) {
+        const delay = phase === 'completed' ? completedOverlayMs : phase === 'idle' ? 0 : 2500
+        hideTimer = setTimeout(() => windows.overlay.hide(), delay)
+      }
     }
     prior = state
   }
