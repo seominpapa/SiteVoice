@@ -4,8 +4,10 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createWorkflow, isBusy } from '../core/workflow.ts'
 import { createSpeechService } from '../core/openai.ts'
+import { transcribeRecording, validLiveChunk } from '../core/recording-transcription.ts'
+import { createLiveTranscription } from '../core/realtime.ts'
 import { validateSettings, validateAudio, MAX_RECORDING_MS } from '../core/validation.ts'
-import type { HistoryEntry, Recording, Snapshot, State, Theme } from '../shared.ts'
+import { BATCH_TRANSCRIPTION_MODEL, LIVE_TRANSCRIPTION_MODEL, type HistoryEntry, type Recording, type Snapshot, type State, type Theme } from '../shared.ts'
 import { parseId, parseKey, type NativeReason, type NativeReply, type View } from './boundary.ts'
 import { createTargetClient } from './native.ts'
 import { createPrimaryShortcut } from './native-shortcut.ts'
@@ -119,6 +121,7 @@ async function startApp() {
   let audioTimer: NodeJS.Timeout | undefined
   let hideTimer: NodeJS.Timeout | undefined
   let awaitingAudio = 0
+  let liveRecording: { id: number; abort: AbortController; session: ReturnType<typeof createLiveTranscription> } | undefined
   let operation = false
   let tray: Tray
 
@@ -143,7 +146,14 @@ async function startApp() {
   }
 
   const workflow = createWorkflow({
-    transcribe: (audio, signal) => service().transcribe(audio, settings, signal),
+    transcribe: (audio, signal) => {
+      const active = liveRecording
+      const fileSettings = settings.transcriptionModel === LIVE_TRANSCRIPTION_MODEL
+        ? { ...settings, transcriptionModel: BATCH_TRANSCRIPTION_MODEL } : settings
+      return transcribeRecording(active?.session, () => service().transcribe(audio, fileSettings, signal), signal, {
+        requestedModel: settings.transcriptionModel, fileModel: fileSettings.transcriptionModel,
+      })
+    },
     clean: (raw, signal) => service().clean(raw, settings, signal),
     async paste(text, signal) {
       const captured = await target
@@ -185,7 +195,13 @@ async function startApp() {
   }
   function record(command: Recording['command'], id: number) {
     if (!overlayReady || quitting || windows.overlay.isDestroyed()) return
-    windows.overlay.webContents.send('voice:record', { command, id, microphoneId: settings.microphoneId } satisfies Recording)
+    windows.overlay.webContents.send('voice:record', { command, id, microphoneId: settings.microphoneId,
+      live: command === 'start' && liveRecording?.id === id } satisfies Recording)
+  }
+  function stopLiveRecording() {
+    const active = liveRecording
+    liveRecording = undefined
+    active?.abort.abort()
   }
   function overlayResult(state: State) {
     return state.phase === 'copy' && state.id === overlayRecordingId ? state.cleaned : undefined
@@ -227,6 +243,7 @@ async function startApp() {
       if (phase === 'pasting') globalShortcut.unregister('Escape')
       clearTimeout(hideTimer)
     } else {
+      stopLiveRecording()
       clearTimeout(captureTimer)
       clearTimeout(audioTimer)
       awaitingAudio = 0
@@ -276,6 +293,10 @@ async function startApp() {
     if (!workflow.start()) return
     const id = workflow.getState().id
     overlayRecordingId = id
+    if (settings.transcriptionModel === LIVE_TRANSCRIPTION_MODEL) {
+      const abort = new AbortController()
+      liveRecording = { id, abort, session: createLiveTranscription(key, settings.terms, abort.signal) }
+    }
     try { globalShortcut.register('Escape', () => workflow.cancel()) } catch { /* Overlay cancel still works. */ }
     windows.showOverlay()
     record('start', id)
@@ -492,6 +513,20 @@ async function startApp() {
       }
     }
   })
+  handle('live-chunk', ['overlay'], (value: unknown, bytes: unknown) => {
+    const active = liveRecording
+    const id = parseId(value)
+    const { phase } = workflow.getState()
+    if (!active || active.id !== id || (phase !== 'recording' && !(phase === 'transcribing' && awaitingAudio === id))) return
+    if (!validLiveChunk(bytes)) {
+      stopLiveRecording()
+      throw new Error('실시간 전사 음성을 읽을 수 없습니다.')
+    }
+    active.session.append(bytes)
+  })
+  handle('live-unavailable', ['overlay'], (value: unknown) => {
+    if (parseId(value) === liveRecording?.id) stopLiveRecording()
+  })
   handle('audio', ['overlay'], (value: unknown, bytes: unknown, mime: unknown) => {
     const id = parseId(value)
     if (id !== awaitingAudio || workflow.getState().phase !== 'transcribing') return
@@ -551,6 +586,7 @@ async function startApp() {
       return
     }
     quitting = true
+    stopLiveRecording()
     workflow.cancel()
     globalShortcut.unregisterAll()
     primary.stop()

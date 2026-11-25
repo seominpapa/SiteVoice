@@ -27,6 +27,8 @@ const bridge: Voice = {
   onHistory: cb => subscribe<{ history: HistoryEntry[]; warning?: string }>('voice:history', ({ history, warning }) => cb(history, warning)),
   overlayAction: (action, id) => invoke('voice:overlay-action', action, id),
   audio: (id, bytes, mime) => invoke('voice:audio', id, bytes, mime),
+  liveChunk: (id, bytes) => invoke('voice:live-chunk', id, bytes),
+  liveUnavailable: id => invoke('voice:live-unavailable', id),
   recordingError: (id, reason) => invoke('voice:error', id, reason),
   onState: cb => subscribe('voice:state', cb),
   onRecording: cb => subscribe('voice:record', cb),
@@ -36,8 +38,8 @@ ipcRenderer.on('voice:appearance', (_event, theme: unknown) => {
   if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
 })
 if (window.location.hash === '#overlay') {
-  const { overlayAction, audio, recordingError, onState, onRecording, ready } = bridge
-  contextBridge.exposeInMainWorld('voice', { overlayAction, audio, recordingError, onState, onRecording, ready })
+  const { overlayAction, audio, liveChunk, liveUnavailable, recordingError, onState, onRecording, ready } = bridge
+  contextBridge.exposeInMainWorld('voice', { overlayAction, audio, liveChunk, liveUnavailable, recordingError, onState, onRecording, ready })
 } else {
   const { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, copyHistory, onHistory, onState } = bridge
   contextBridge.exposeInMainWorld('voice', { get, save, setTheme, setAutoUpdate, checkUpdate, setShortcutCapture, onShortcutCapture, requestShortcutPermission, key, permission, action, copyHistory, onHistory, onState })

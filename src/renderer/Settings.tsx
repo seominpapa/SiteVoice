@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { KeyAction, Settings, Snapshot } from '../shared';
-import { MAX_TERMS, MAX_TERM_LENGTH, MAX_TERM_MEANING_LENGTH } from '../shared';
+import { BATCH_TRANSCRIPTION_MODEL, LIVE_TRANSCRIPTION_MODEL, MAX_TERMS, MAX_TERM_LENGTH, MAX_TERM_MEANING_LENGTH } from '../shared';
 import { Icon } from './presentation';
 import { ShortcutPicker } from './ShortcutPicker';
 
@@ -29,6 +29,8 @@ export function SettingsFields({ draft, change, snapshot, disabled, onShortcutPe
   const [term, setTerm] = useState('');
   const [meaning, setMeaning] = useState('');
   const terms = draft.terms;
+  const savedModel = snapshot.settings.transcriptionModel;
+  const legacyModel = savedModel !== BATCH_TRANSCRIPTION_MODEL && savedModel !== LIVE_TRANSCRIPTION_MODEL ? savedModel : undefined;
   const termValue = term.trim().normalize('NFC');
   const canAdd = !disabled && termValue && terms.length < MAX_TERMS &&
     !terms.some((item) => item.term.trim().normalize('NFC') === termValue);
@@ -36,9 +38,19 @@ export function SettingsFields({ draft, change, snapshot, disabled, onShortcutPe
     <section className="panel" aria-labelledby="models-heading">
       <div className="panel-heading"><span className="panel-icon"><Icon name="setup"/></span><div><h2 id="models-heading">모델과 단축키</h2><p>전사와 문장 정리에 사용할 모델을 따로 지정할 수 있습니다.</p></div></div>
       <div className="columns">
-        <label className="field">음성 전사 모델<input value={draft.transcriptionModel} maxLength={128} onChange={(event) => change({ ...draft, transcriptionModel: event.target.value })} spellCheck={false}/></label>
+        <label className="field">음성 전사 모델
+          <select value={draft.transcriptionModel} disabled={disabled} aria-describedby="transcription-model-help"
+            onChange={(event) => change({ ...draft, transcriptionModel: event.target.value })}>
+            <option value={LIVE_TRANSCRIPTION_MODEL}>실시간 전사 · {LIVE_TRANSCRIPTION_MODEL}</option>
+            <option value={BATCH_TRANSCRIPTION_MODEL}>녹음 후 전사 · {BATCH_TRANSCRIPTION_MODEL}</option>
+            {legacyModel && <option value={legacyModel}>기존 모델 · {legacyModel}</option>}
+          </select>
+        </label>
         <label className="field">문장 정리 모델<input value={draft.cleanupModel} maxLength={128} onChange={(event) => change({ ...draft, cleanupModel: event.target.value })} spellCheck={false}/></label>
       </div>
+      <p id="transcription-model-help"><small>{draft.transcriptionModel === LIVE_TRANSCRIPTION_MODEL
+        ? '녹음하는 동안 음성이 OpenAI로 전송됩니다. 실시간 전사에 실패하면 같은 녹음을 파일로 다시 보내 처리합니다.'
+        : '녹음을 마친 뒤에 음성을 OpenAI로 보냅니다.'}</small></p>
       <ShortcutPicker value={draft.shortcut} platform={snapshot.platform} status={snapshot.shortcutPermission}
         registered={snapshot.shortcutRegistered} disabled={disabled} onPermission={onShortcutPermission}
         onKeyboardSettings={onKeyboardSettings}

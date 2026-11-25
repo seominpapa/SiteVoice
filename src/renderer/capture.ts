@@ -2,12 +2,20 @@ export type CaptureError = 'permission' | 'device' | 'silent' | 'tooLarge' | 're
 
 const maxBytes = 20 * 1024 * 1024;
 export const durationLimitMs = 5 * 60 * 1000;
+const liveDrainMs = 750;
 const preferredMimeTypes = ['audio/webm;codecs=opus', 'audio/mp4'];
+
+export interface LiveCapture {
+  stop(): Promise<void>;
+  cancel(): void;
+}
 
 interface CaptureIO {
   stream(options: MediaStreamConstraints): Promise<MediaStream>;
   recorder(stream: MediaStream): MediaRecorder;
   meter(stream: MediaStream, onSample: (rms: number) => void): () => void;
+  live?(id: number, stream: MediaStream, unavailable: () => void): LiveCapture;
+  liveUnavailable?(id: number): void;
   audio(id: number, bytes: ArrayBuffer, mime: string): void;
   error(id: number, reason: CaptureError): void;
   level(value: number): void;
@@ -21,6 +29,10 @@ interface ActiveCapture {
   recorder?: MediaRecorder;
   stopMeter?: () => void;
   stopTimer?: () => void;
+  live?: LiveCapture;
+  waitLive?: Promise<void>;
+  completeLive?: () => void;
+  liveUnavailable?: boolean;
   chunks: Blob[];
   bytes: number;
   samples: number;
@@ -83,7 +95,7 @@ export class Capture {
 
   constructor(io: CaptureIO) { this.io = io; }
 
-  async start(id: number, deviceId?: string) {
+  async start(id: number, deviceId?: string, live = false) {
     if (id <= this.greatestStartedId) return;
     this.greatestStartedId = id;
     this.release();
@@ -111,6 +123,7 @@ export class Capture {
       recorder.addEventListener('error', () => this.fail(task, 'recording'), { once: true });
       recorder.addEventListener('stop', () => void this.finish(task), { once: true });
       recorder.start(500);
+      if (live) this.startLive(task, stream);
       this.io.input(true);
       task.stopMeter = this.io.meter(stream, (rms) => {
         if (this.current !== task || task.stopping) return;
@@ -131,6 +144,7 @@ export class Capture {
       return;
     }
     task.stopping = true;
+    if (task.live) task.waitLive = this.stopLive(task, task.live);
     try {
       task.recorder.stop();
     } catch {
@@ -146,6 +160,8 @@ export class Capture {
     this.current = undefined;
     task.stopTimer?.();
     task.chunks = [];
+    this.cancelLive(task);
+    task.completeLive?.();
     try {
       if (task.recorder && task.recorder.state !== 'inactive') task.recorder.stop();
     } catch {
@@ -153,6 +169,50 @@ export class Capture {
     } finally {
       this.releaseMedia(task);
     }
+  }
+
+  private startLive(task: ActiveCapture, stream: MediaStream) {
+    try {
+      task.live = this.io.live?.(task.id, stream, () => this.unavailable(task));
+      if (!task.live) this.unavailable(task);
+    } catch {
+      this.unavailable(task);
+    }
+  }
+
+  private unavailable(task: ActiveCapture) {
+    if (this.current !== task || task.liveUnavailable) return;
+    task.liveUnavailable = true;
+    this.io.liveUnavailable?.(task.id);
+  }
+
+  private cancelLive(task: ActiveCapture) {
+    const live = task.live;
+    task.live = undefined;
+    live?.cancel();
+  }
+
+  private stopLive(task: ActiveCapture, live: LiveCapture) {
+    return new Promise<void>((resolve) => {
+      const stopTimer = this.io.timeout(() => {
+        this.unavailable(task);
+        this.cancelLive(task);
+        complete();
+      }, liveDrainMs);
+      const complete = () => {
+        stopTimer();
+        task.completeLive = undefined;
+        resolve();
+      };
+      task.completeLive = complete;
+      const failed = () => {
+        this.unavailable(task);
+        this.cancelLive(task);
+        complete();
+      };
+      try { void live.stop().then(complete, failed); }
+      catch { failed(); }
+    });
   }
 
   private releaseMedia(task: ActiveCapture) {
@@ -189,6 +249,7 @@ export class Capture {
     try {
       const mime = task.recorder!.mimeType.split(';')[0];
       const bytes = await new Blob(task.chunks, { type: mime }).arrayBuffer();
+      await task.waitLive;
       if (this.current !== task) return;
       this.release(task.id);
       this.io.audio(task.id, bytes, mime);

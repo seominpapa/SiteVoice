@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { OverlayAction, State } from '../shared';
 import { browserRecorder, Capture, monitorMic } from './capture';
+import { browserLiveCapture } from './live-audio';
 import { Icon, isActive, phaseLabel } from './presentation';
 
 export function Overlay() {
@@ -14,6 +15,8 @@ export function Overlay() {
       stream: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
       recorder: browserRecorder,
       meter: monitorMic,
+      live: (id, stream, unavailable) => browserLiveCapture(stream, (bytes) => window.voice.liveChunk(id, bytes), unavailable),
+      liveUnavailable: (id) => { void window.voice.liveUnavailable(id).catch(() => {}); },
       audio: (id, bytes, mime) => { void window.voice.audio(id, bytes, mime).catch(() => setError(true)); },
       error: (id, reason) => { void window.voice.recordingError(id, reason).catch(() => setError(true)); },
       level: setLevel,
@@ -28,8 +31,8 @@ export function Overlay() {
       setState(value);
       setNow(Date.now());
     });
-    const unsubscribeRecording = window.voice.onRecording(({ id, command, microphoneId }) => {
-      if (command === 'start') void capture.start(id, microphoneId);
+    const unsubscribeRecording = window.voice.onRecording(({ id, command, microphoneId, live }) => {
+      if (command === 'start') void capture.start(id, microphoneId, live);
       if (command === 'stop') capture.stop(id);
       if (command === 'release') capture.release(id);
     });

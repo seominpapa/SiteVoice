@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -16,6 +16,14 @@ async function dashboard(app: ElectronApplication) {
 }
 async function close(app?: ElectronApplication) {
   await app?.close().catch(() => undefined)
+}
+async function saveTranscriptionModel(page: Page, transcriptionModel: string) {
+  const savedModel = await page.evaluate(async model => {
+    const { settings } = await window.voice.get()
+    const saved = await window.voice.save({ ...settings, transcriptionModel: model })
+    return saved.settings.transcriptionModel
+  }, transcriptionModel)
+  expect(savedModel).toBe(transcriptionModel)
 }
 
 test('first run: saves encrypted key, survives app restart, deletes key', async ({}, testInfo) => {
@@ -54,6 +62,7 @@ test('records with fake device, offers copy fallback, and keeps results after re
   try {
     app = await launch(profile)
     let page = await dashboard(app)
+    await saveTranscriptionModel(page, 'gpt-transcribe')
     await app.evaluate(({ clipboard, systemPreferences }) => {
       Object.defineProperty(clipboard, 'writeText', { configurable: true, value: (text: string) => {
         if (Reflect.get(globalThis, 'voiceInputMockClipboardDenied')) throw new Error('Clipboard unavailable')
@@ -181,6 +190,7 @@ if (process.argv.includes('--shortcut')) {
 `, { mode: 0o700 })
     app = await launch(join(fixture, 'profile'), fixture)
     const page = await dashboard(app)
+    await saveTranscriptionModel(page, 'gpt-transcribe')
     const sentence = '도면을 오늘 검토합니다.'
     await app.evaluate(({ systemPreferences }, text) => {
       Object.defineProperty(systemPreferences, 'getMediaAccessStatus', { configurable: true, value: () => 'granted' })
@@ -371,6 +381,41 @@ test('saves a glossary term and its meaning, including edits after restart', asy
     page = await dashboard(app)
     await openSettings()
     await expect(registeredMeaning()).toHaveValue('터널 굴착면이나 사면에 뿜어 붙이는 콘크리트')
+  } finally {
+    await close(app)
+    await rm(profile, { recursive: true, force: true })
+  }
+})
+
+test('defaults to realtime and keeps a saved custom transcription model until switching', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'sitevoice-transcription-model-'))
+  let app: ElectronApplication | undefined
+  try {
+    app = await launch(profile)
+    let page = await dashboard(app)
+    const model = () => page.getByRole('combobox', { name: '음성 전사 모델', exact: true })
+    const openSettings = () => page.getByRole('button', { name: '환경 설정', exact: true }).click()
+    await openSettings()
+    await expect(model()).toHaveValue('gpt-live-transcribe')
+    await expect(model().locator('option')).toHaveCount(2)
+    await expect(model()).toHaveAccessibleDescription(/녹음하는 동안.*같은 녹음을 파일로 다시 보내/)
+    await saveTranscriptionModel(page, 'gpt-4o-mini-transcribe')
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await openSettings()
+    await expect(model()).toHaveValue('gpt-4o-mini-transcribe')
+    await expect(model().locator('option')).toHaveCount(3)
+    await model().selectOption('gpt-transcribe')
+    await expect(model()).toHaveAccessibleDescription(/녹음을 마친 뒤에 음성을 OpenAI로 보냅니다/)
+    await page.getByRole('button', { name: '환경 설정 저장' }).click()
+    await expect(page.getByText('환경 설정을 저장했습니다.')).toBeVisible()
+    await close(app)
+    app = await launch(profile)
+    page = await dashboard(app)
+    await openSettings()
+    await expect(model()).toHaveValue('gpt-transcribe')
+    await expect(model().locator('option')).toHaveCount(2)
   } finally {
     await close(app)
     await rm(profile, { recursive: true, force: true })

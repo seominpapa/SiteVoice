@@ -63,3 +63,35 @@ test('meaning guard tolerates equivalent notation and repeated quantity but catc
     ['do not send this', 'send this'], ['보고해요.', '보고하지 마세요.'],
   ]) assert.ok(meaningConcern(a, b), a + ' -> ' + b)
 })
+
+test('the number guard treats a consecutive list as formatting without losing quantities inside items', () => {
+  assert.equal(meaningConcern(
+    '두 가지 기능을 하는 앱을 만들고 싶어. 잘 듣고 잘 말하고',
+    '2가지 기능을 하는 앱을 만들고 싶어.\n1. 잘 듣고\n2. 잘 말하고'
+  ), undefined)
+  assert.equal(meaningConcern(
+    '도면을 2장 검토하고 결과를 공유해요.',
+    '할 일\n1. 도면을 2장 검토해요.\n2. 결과를 공유해요.'
+  ), undefined)
+  assert.equal(meaningConcern(
+    '첫 번째, 깊이 3.5m를 확인해요. 두 번째, 비용 3만원을 검토해요.',
+    '1. 깊이 3.5m를 확인해요.\n2. 비용 3만원을 검토해요.'
+  ), undefined)
+  assert.equal(meaningConcern(
+    '할 일:\n1. 도면을 확인해요.\n2. 사진과 자료를 정리해요.',
+    '1. 도면을 확인해요.\n2. 사진과 자료를 정리해요.'
+  ), undefined)
+  for (const [raw, cleaned] of [
+    ['두 가지 기능을 하는 앱을 만들고 싶어. 잘 듣고 잘 말하고', '기능을 하는 앱을 만들고 싶어.\n1. 잘 듣고\n2. 잘 말하고'],
+    ['깊이 3.5m를 확인해요.', '1. 깊이 35m를 확인해요.\n2. 기록해요.'],
+    ['도면을 검토하고 결과를 공유해요.', '1. 도면을 검토해요.\n3. 결과를 공유해요.'],
+    ['도면을 검토하고 결과를 공유해요.', '1. 도면을 검토하고 결과를 공유해요.'],
+    ['도면을 검토하고 결과를 공유해요.', '1.5m 도면을 검토해요.\n2. 결과를 공유해요.'],
+    ['두 번째 도면을 검토하고 세 번째 도면은 남겨요.', '1. 도면을 검토해요.\n2. 도면을 남겨요.'],
+  ]) assert.ok(meaningConcern(raw, cleaned), raw + ' -> ' + cleaned)
+})
+
+test('a correction marker does not bypass review of changed numbers or negation', () => {
+  assert.ok(meaningConcern('3m, 아니 2m를 굴착해요.', '2m를 굴착해요.'))
+  assert.ok(meaningConcern('보내지 마세요. 그게 아니고 보내 주세요.', '보내 주세요.'))
+})

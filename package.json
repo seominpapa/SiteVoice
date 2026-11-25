@@ -1,7 +1,7 @@
 {
   "name": "voiceinput",
   "productName": "SiteVoice",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "private": true,
   "description": "개인용 한국어 음성 입력",
   "author": "SiteVoice",

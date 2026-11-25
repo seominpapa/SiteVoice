@@ -7,11 +7,12 @@ import type { Audio } from '../src/core/validation.ts'
 const audio: Audio = { bytes: new ArrayBuffer(10), mime: 'audio/webm', extension: 'webm' }
 const raw = '회의는 화요일에, 아니 수요일 오후 세 시에 하고요. 도면 검토가 필요해요. 도면을 한번 검토해야 합니다.'
 const cleaned = '회의는 수요일 오후 3시에 진행하며, 도면 검토가 필요합니다.'
+const transcript = (text: string) => ({ text, transcriptionModel: 'gpt-transcribe', transcriptionMode: 'file' as const })
 function fixture(overrides: Partial<Parameters<typeof createWorkflow>[0]> = {}) {
   const calls = { transcribe: 0, clean: 0, paste: 0 }
   const phases: string[] = []
   const flow = createWorkflow({
-    transcribe: async () => { calls.transcribe++; return raw },
+    transcribe: async () => { calls.transcribe++; return transcript(raw) },
     clean: async (input) => { calls.clean++; assert.equal(input, raw); return cleaned },
     paste: async (input) => { calls.paste++; assert.equal(input, cleaned); return { ok: true } },
     onState: ({ phase }) => phases.push(phase),
@@ -48,7 +49,7 @@ test('records once, ignores audio until stopped and stale audio, and only dispat
 })
 
 test('cancellation aborts a transcription and stale success cannot affect the next recording', async () => {
-  const pending = Promise.withResolvers<string>()
+  const pending = Promise.withResolvers<ReturnType<typeof transcript>>()
   let signal: AbortSignal | undefined
   const { flow, calls } = fixture({ transcribe: (_, value) => { signal = value; return pending.promise } })
   const oldId = startAndStop(flow)
@@ -57,7 +58,7 @@ test('cancellation aborts a transcription and stale success cannot affect the ne
   assert.equal(signal?.aborted, true)
   assert.equal(flow.getState().phase, 'cancelled')
   assert.equal(flow.start(), true)
-  pending.resolve(raw)
+  pending.resolve(transcript(raw))
   await submission
   assert.equal(flow.getState().phase, 'recording')
   assert.notEqual(flow.getState().id, oldId)
@@ -111,7 +112,7 @@ test('cleanup failure keeps the transcript and retry cannot auto-paste; earlier 
 
 test('a unit change or paste refusal returns a copy result', async () => {
   const changed = fixture({
-    transcribe: async () => '깊이는 3.5미터입니다.',
+    transcribe: async () => transcript('깊이는 3.5미터입니다.'),
     clean: async () => '깊이는 35미터입니다.',
   })
   await changed.flow.submitAudio(startAndStop(changed.flow), audio)
@@ -152,4 +153,31 @@ test('transcription failure ends safely without exposing an upstream error or ru
   assert.equal(flow.cancel(), false)
   await flow.retry()
   assert.equal(calls.clean + calls.paste, 0)
+})
+
+test('times the app recording and post-stop wait separately from cleanup and preserves the last diagnostics on dismiss', async () => {
+  let now = 100
+  const { flow } = fixture({
+    now: () => now,
+    transcribe: async () => { now += 600; return { ...transcript(raw), transcriptionMode: 'fallback' } },
+    clean: async () => { now += 250; return cleaned },
+    paste: async () => { now += 1500; return { ok: true } },
+  })
+  flow.start()
+  now += 4000
+  flow.stop()
+  now += 100 // Recorder hands over its audio after the user stops.
+  await flow.submitAudio(flow.getState().id, audio)
+  const expected = {
+    recordingMs: 4000, transcriptionMs: 700, cleanupMs: 250,
+    transcriptionModel: 'gpt-transcribe', transcriptionMode: 'fallback', recordedAt: flow.getState().resultAt,
+  }
+  assert.deepEqual(flow.getState().diagnostics, expected)
+  await flow.retry()
+  assert.deepEqual(flow.getState().diagnostics, { ...expected, cleanupRetried: true })
+  flow.dismiss()
+  assert.deepEqual(flow.getState().diagnostics, { ...expected, cleanupRetried: true })
+  flow.start()
+  flow.cancel()
+  assert.deepEqual(flow.getState().diagnostics, { ...expected, cleanupRetried: true })
 })

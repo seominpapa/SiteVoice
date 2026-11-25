@@ -152,6 +152,11 @@ input::placeholder { color: var(--muted); }
 .result-overview { display: flex; align-items: center; justify-content: space-between; gap: 9px; background: var(--surface); }
 .result-overview .panel-heading { margin: 0; }
 .result-panel .panel-heading { justify-content: space-between; }
+.result-diagnostics > summary { cursor: pointer; font-weight: 600; outline-offset: 4px; }
+.result-diagnostics > summary:hover { color: var(--link); }
+.result-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr)); gap: 12px 18px; margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.result-diagnostics dt { font-size: 12px; color: var(--muted); }
+.result-diagnostics dd { margin: 3px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .result-history { display: grid; gap: 12px; list-style: none; padding: 0; margin: 0; }
 .result-history time { color: var(--muted); font-size: 13px; }
 .result-history .transcript { min-height: 0; }

@@ -1,9 +1,9 @@
-import { MAX_TERMS, MAX_TERM_LENGTH, MAX_TERM_MEANING_LENGTH, type GlossaryEntry, type Settings } from '../shared.ts'
+import { LIVE_TRANSCRIPTION_MODEL, MAX_TERMS, MAX_TERM_LENGTH, MAX_TERM_MEANING_LENGTH, type GlossaryEntry, type Settings } from '../shared.ts'
 import { ServiceError } from './errors.ts'
 import { defaultShortcut, validateShortcut } from './shortcuts.ts'
 
 export const DEFAULT_SETTINGS: Settings = {
-  transcriptionModel: 'gpt-transcribe',
+  transcriptionModel: LIVE_TRANSCRIPTION_MODEL,
   cleanupModel: 'gpt-6-luna',
   shortcut: defaultShortcut(process.platform),
   microphoneId: '',

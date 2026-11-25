@@ -1,6 +1,9 @@
 export const MAX_TERMS = 64
 export const MAX_TERM_LENGTH = 80
 export const MAX_TERM_MEANING_LENGTH = 300
+export const BATCH_TRANSCRIPTION_MODEL = 'gpt-transcribe'
+export const LIVE_TRANSCRIPTION_MODEL = 'gpt-live-transcribe'
+export const MAX_LIVE_CHUNK_BYTES = 64 * 1024
 export type GlossaryEntry = { term: string; meaning: string }
 
 export type Settings = {
@@ -11,6 +14,17 @@ export type Settings = {
   terms: GlossaryEntry[]
 }
 export type Phase = 'idle' | 'recording' | 'transcribing' | 'cleaning' | 'pasting' | 'completed' | 'copy' | 'failed' | 'cancelled'
+export type TranscriptionSource = {
+  transcriptionModel: string
+  transcriptionMode: 'live' | 'file' | 'fallback'
+}
+export type RecordingDiagnostics = TranscriptionSource & {
+  recordedAt?: number
+  recordingMs: number
+  transcriptionMs: number
+  cleanupMs: number
+  cleanupRetried?: boolean
+}
 export type State = {
   phase: Phase
   id: number
@@ -21,6 +35,7 @@ export type State = {
   raw?: string
   cleaned?: string
   message?: string
+  diagnostics?: RecordingDiagnostics
 }
 export type Theme = 'light' | 'dark'
 export type PrimaryShortcut = 'Fn' | 'Windows'
@@ -49,7 +64,7 @@ export type Permission = 'microphone' | 'accessibility' | 'keyboard'
 export type Action = 'start' | 'stop' | 'cancel' | 'retry' | 'copyRaw' | 'copyCleaned' | 'dismiss'
 export type OverlayAction = 'stop' | 'cancel' | 'copyResult' | 'closeResult'
 export type RecordingError = 'permission' | 'device' | 'silent' | 'tooLarge' | 'recording'
-export type Recording = { command: 'start' | 'stop' | 'release'; id: number; microphoneId?: string }
+export type Recording = { command: 'start' | 'stop' | 'release'; id: number; microphoneId?: string; live?: boolean }
 export interface Voice {
   get(): Promise<Snapshot>
   save(settings: Settings): Promise<Snapshot>
@@ -66,6 +81,8 @@ export interface Voice {
   onHistory(cb: (history: HistoryEntry[], warning?: string) => void): () => void
   overlayAction(action: OverlayAction, id: number): Promise<void>
   audio(id: number, bytes: ArrayBuffer, mime: string): Promise<void>
+  liveChunk(id: number, bytes: ArrayBuffer): Promise<void>
+  liveUnavailable(id: number): Promise<void>
   recordingError(id: number, reason: RecordingError): Promise<void>
   onState(cb: (s: State) => void): () => void
   onRecording(cb: (r: Recording) => void): () => void

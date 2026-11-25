@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSpeechService } from '../src/core/openai.ts'
 import { DEFAULT_SETTINGS, validateAudio } from '../src/core/validation.ts'
+import { BATCH_TRANSCRIPTION_MODEL } from '../src/shared.ts'
 
 const signal = new AbortController().signal
 const key = 'test-key-never-sent'
@@ -48,7 +49,7 @@ test('file transcription passes keyword hints and Korean plus English as possibl
     assert.equal(file.type, 'audio/webm')
     return asResponse({ text: 'SiteCAD 도면 1장 검토해요.' })
   })
-  assert.equal(await speech.transcribe(audio, settings, signal), 'SiteCAD 도면 1장 검토해요.')
+  assert.equal(await speech.transcribe(audio, { ...settings, transcriptionModel: BATCH_TRANSCRIPTION_MODEL }, signal), 'SiteCAD 도면 1장 검토해요.')
 })
 
 test('legacy transcription receives prompt, without new keyword fields', async () => {
@@ -110,7 +111,7 @@ test('provider errors are sanitized by phase and inference requests are never au
   assert.equal(calls, 1)
 
   const missing = createSpeechService(key, async (input) => {
-    if (String(input).endsWith('gpt-transcribe')) {
+    if (String(input).endsWith('/' + settings.transcriptionModel)) {
       return asResponse({ id: settings.transcriptionModel })
     }
     return asResponse({ error: { message: 'private model details' } }, 404)
