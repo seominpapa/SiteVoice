@@ -7,7 +7,12 @@
 
 static WNDPROC editProcedure;
 static LRESULT CALLBACK withoutSelectionInfo(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (message == EM_GETSEL) return 0;
+    if (message == EM_GETSEL) {
+        constexpr auto unset = (std::numeric_limits<DWORD>::max)();
+        if (wparam) *reinterpret_cast<DWORD*>(wparam) = unset;
+        if (lparam) *reinterpret_cast<DWORD*>(lparam) = unset;
+        return -1;
+    }
     return CallWindowProcW(editProcedure, window, message, wparam, lparam);
 }
 
