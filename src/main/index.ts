@@ -17,6 +17,7 @@ import { createVault } from './vault.ts'
 import { createHistory, validateHistoryEntry } from './history.ts'
 import { createWindows, dashboardColor } from './windows.ts'
 import { createUpdateController } from './updates.ts'
+import { createWindowsUpdateDriver, launchWindowsUpdate } from './windows-updates.ts'
 
 const running = new Set(['recording', 'transcribing', 'cleaning', 'pasting'])
 const completedOverlayMs = 450
@@ -172,6 +173,11 @@ async function startApp() {
   const updates = createUpdateController({
     resourcesPath: process.resourcesPath,
     isPackaged: app.isPackaged,
+    windowsDriver: () => createWindowsUpdateDriver({
+      installed: app.getVersion(),
+      root: join(app.getPath('userData'), 'windows-updates'),
+      launch: path => launchWindowsUpdate(path, () => app.quit())
+    }),
     canInterrupt: () => !quitting && !operation && !capturingShortcut && !historyWritesPending && !isBusy(workflow.getState().phase),
     async confirm(version) {
       const result = await dialog.showMessageBox(windows.dashboard, {

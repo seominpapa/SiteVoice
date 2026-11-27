@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -38,11 +38,26 @@ test('does not load the updater in development or without HTTPS distribution met
   assert.equal(loaded, false)
 }))
 
-test('does not enable in-app updates on Windows or Linux', async () => fixture(async dir => {
+test('only enables Windows updates in packaged installs with the Windows channel marker', async () => fixture(async dir => {
   const file = join(dir, 'app-update.yml')
   await writeFile(file, manifest)
   assert.equal(hasSupportedFeed(true, dir, 'win32'), false)
+  await mkdir(join(dir, 'build'))
+  await writeFile(join(dir, 'build', 'windows-update.channel'), 'sitevoice-win-x64-v1\n')
+  assert.equal(hasSupportedFeed(true, dir, 'win32'), true)
+  assert.equal(hasSupportedFeed(false, dir, 'win32'), false)
   assert.equal(hasSupportedFeed(true, dir, 'linux'), false)
+  const controller = createUpdateController({
+    isPackaged: true, resourcesPath: dir, platform: 'win32',
+    canInterrupt: () => true, confirm: async () => false,
+    windowsDriver: () => ({
+      checkForUpdates: async () => update,
+      downloadUpdate: async () => { assert.fail('did not approve Windows update') },
+      install: async () => { assert.fail('did not approve Windows update') }
+    })
+  })
+  assert.equal(controller.available, true)
+  assert.match(await controller.check(), /나중에/)
 }))
 
 test('only the packaged SiteVoice repository is accepted as a private GitHub feed', async () => fixture(async dir => {

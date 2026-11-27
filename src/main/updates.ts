@@ -18,6 +18,7 @@ type Options = {
   isPackaged: boolean
   resourcesPath: string
   platform?: NodeJS.Platform
+  windowsDriver?: () => UpdateDriver
   canInterrupt(): boolean
   confirm(version: string): Promise<boolean>
   load?(feed: UpdateFeed): UpdateDriver
@@ -51,6 +52,13 @@ function readSupportedFeed(isPackaged: boolean, resourcesPath: string, platform 
 }
 
 export function hasSupportedFeed(isPackaged: boolean, resourcesPath: string, platform = process.platform) {
+  if (isPackaged && platform === 'win32') {
+    try {
+      const marker = join(resourcesPath, 'build', 'windows-update.channel')
+      const stat = statSync(marker)
+      return stat.isFile() && stat.size <= 32 && readFileSync(marker, 'utf8').trim() === 'sitevoice-win-x64-v1'
+    } catch { return false }
+  }
   return readSupportedFeed(isPackaged, resourcesPath, platform) !== null
 }
 
@@ -116,22 +124,24 @@ function productionDriver(feed: UpdateFeed): UpdateDriver {
   }
 }
 
-export function createUpdateController({ isPackaged, resourcesPath, platform, canInterrupt, confirm, load = productionDriver }: Options) {
+export function createUpdateController({ isPackaged, resourcesPath, platform = process.platform, canInterrupt, confirm, load = productionDriver, windowsDriver }: Options) {
   const feed = readSupportedFeed(isPackaged, resourcesPath, platform)
+  const driverFactory = feed ? () => load(feed)
+    : platform === 'win32' && hasSupportedFeed(isPackaged, resourcesPath, platform) ? windowsDriver : undefined
   const inUse = '진행 중인 작업이 끝난 뒤 업데이트를 다시 확인해 주세요.'
   let busy = false
   let driver: UpdateDriver | undefined
 
   return {
-    available: feed !== null,
+    available: Boolean(driverFactory),
     get busy() { return busy },
     async check() {
-      if (!feed) return '이 빌드는 자동 업데이트를 지원하지 않습니다.'
+      if (!driverFactory) return '이 빌드는 자동 업데이트를 지원하지 않습니다.'
       if (busy || !canInterrupt()) return inUse
       busy = true
       let phase = '확인'
       try {
-        driver ??= load(feed)
+        driver ??= driverFactory()
         const result = await driver.checkForUpdates()
         if (!result) throw new Error()
         if (!result.isUpdateAvailable) return '최신 버전을 사용 중입니다.'

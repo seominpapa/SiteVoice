@@ -90,26 +90,40 @@ jobs:
           & $build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify install, launch, native helper, and uninstall
+      - name: Verify existing Windows installation upgrades, relaunches, and uninstalls
         shell: pwsh
         run: |
           $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
           $dest = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmoke'
-          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
-          if ($install.ExitCode -ne 0) { throw "Installer exited $($install.ExitCode)." }
+          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.10-win-x64.exe'
+          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.10/SiteVoice-0.2.10-win-x64.exe' -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne 'bf236449b1a55026241b0f2b66520751914a26d40e05c6a334b3538ac2b0d9cc') {
+            throw 'The previous installer does not match its published digest.'
+          }
+          $install = Start-Process -FilePath $previous -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Previous installer exited $($install.ExitCode)." }
+          $old = Start-Process -FilePath (Join-Path $dest 'SiteVoice.exe') -PassThru
+          Start-Sleep -Seconds 3
+          if ($old.HasExited) { throw 'The existing app could not start.' }
+          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList '--updated', '/S', '--force-run' -PassThru
+          Start-Sleep -Milliseconds 500
+          if (!$old.HasExited) { Stop-Process -Id $old.Id }
+          if (!$upgrade.WaitForExit(45000) -or $upgrade.ExitCode -ne 0) { throw 'Upgrade installer failed.' }
           $app = Get-Item -LiteralPath (Join-Path $dest 'SiteVoice.exe')
           $helper = Get-Item -LiteralPath (Join-Path $dest 'resources\targets\win32-x64\voice-target.exe')
           if ((Get-FileHash -LiteralPath $helper.FullName).Hash -ne
               (Get-FileHash -LiteralPath 'native/bin/win32-x64/voice-target.exe').Hash) {
             throw 'Installed helper differs from the tested executable.'
           }
-          $profile = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmokeProfile'
-          $process = Start-Process -FilePath $app.FullName -ArgumentList "--user-data-dir=`"$profile`"" -PassThru
-          try {
-            Start-Sleep -Seconds 5
-            if ($process.HasExited) { throw "SiteVoice could not stay running: $($process.ExitCode)." }
-          } finally {
-            if (!$process.HasExited) { Stop-Process -Id $process.Id }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($app.VersionInfo.ProductVersion -cne $version) { throw 'Installed app version is not the target version.' }
+          $marker = Get-Content -LiteralPath (Join-Path $dest 'resources\build\windows-update.channel') -Raw
+          if ($marker.Trim() -cne 'sitevoice-win-x64-v1') { throw 'Windows update channel is missing.' }
+          Start-Sleep -Seconds 5
+          $processes = @(Get-Process SiteVoice -ErrorAction SilentlyContinue | Where-Object Path -eq $app.FullName)
+          if (!$processes.Count) { throw 'The upgraded app was not relaunched.' }
+          foreach ($process in $processes) {
+            Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
           }
           $uninstaller = Get-Item -LiteralPath (Join-Path $dest 'Uninstall SiteVoice.exe')
           $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru

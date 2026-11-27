@@ -76,7 +76,7 @@ await build({
     files: ['dist/**/*', 'package.json'],
     extraResources: [
       { from: 'native/bin/' + process.platform + '-' + arch, to: 'targets/' + process.platform + '-' + arch, filter: ['voice-target', 'voice-target.exe'] },
-      { from: 'build', to: 'build', filter: ['tray*.png'] }
+      { from: 'build', to: 'build', filter: platform === 'win' ? ['tray*.png', 'windows-update.channel'] : ['tray*.png'] }
     ],
     publish: publication,
     npmRebuild: false,
