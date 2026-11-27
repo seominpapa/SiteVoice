@@ -10,8 +10,12 @@ import type { State } from '../../src/shared.ts'
 const run = promisify(execFile)
 const driver = fileURLToPath(new URL('windows-notepad.ps1', import.meta.url))
 async function notepad(command: 'open' | 'shortcut' | 'read' | 'close', target: string) {
-  const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA',
-    '-ExecutionPolicy', 'Bypass', '-File', driver, command, target], { windowsHide: true, timeout: 18_000 })
+  const { stdout, stderr } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA',
+    '-ExecutionPolicy', 'Bypass', '-File', driver, command, target], { windowsHide: true, timeout: 35_000 })
+    .catch(error => {
+      throw new Error(`Notepad ${command} ${error.killed ? 'timed out' : 'failed'}: ${error.stderr || error.message}`)
+    })
+  if (stderr.trim()) console.log(stderr.trim())
   return stdout.trim()
 }
 

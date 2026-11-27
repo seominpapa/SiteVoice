@@ -58,7 +58,7 @@ public static class NotepadDesktop {
 
   // GitHub may have only an elevated desktop. Lower only the new, suspended
   // stock Notepad child before any of its own code runs; leave policy unchanged.
-  public static void StartMediumNotepad(string document) {
+  public static int StartMediumNotepad(string document) {
     var app = Path.Combine(Environment.SystemDirectory, "notepad.exe");
     if (document.IndexOf('"') >= 0 || !File.Exists(document)) throw new ArgumentException("Expected the temporary Notepad document");
     var startup = new StartupInfo { size = Marshal.SizeOf(typeof(StartupInfo)) };
@@ -82,6 +82,7 @@ public static class NotepadDesktop {
       } finally { CloseHandle(token); }
       if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception();
       resumed = true;
+      return child.pid;
     } finally {
       if (!resumed) TerminateProcess(child.process, 1);
       CloseHandle(child.thread);
@@ -122,6 +123,7 @@ function Start-ProbeNotepad([string]$Document) {
   $notepad = "$env:SystemRoot\System32\notepad.exe"
   $argument = '"' + $Document + '"'
   $ownIntegrity = [NotepadDesktop]::IntegrityRid($PID)
+  [Console]::Error.WriteLine("Test process session: " + (Get-Process -Id $PID).SessionId + "; integrity RID: $ownIntegrity")
   if (!$ownIntegrity) { throw 'Could not read the test process integrity.' }
   if ($ownIntegrity -lt 0x3000) {
     Start-Process -FilePath $notepad -ArgumentList $argument
@@ -136,7 +138,8 @@ function Start-ProbeNotepad([string]$Document) {
   } | Select-Object -First 1
   if (!$explorer) {
     if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Run the test from a standard Windows desktop.' }
-    [NotepadDesktop]::StartMediumNotepad($Document)
+    $childId = [NotepadDesktop]::StartMediumNotepad($Document)
+    [Console]::Error.WriteLine("Started stock Notepad: PID $childId")
     return
   }
   try {
@@ -157,6 +160,7 @@ if ($Action -eq 'open') {
   $leaf = [IO.Path]::GetFileNameWithoutExtension($Target)
   Start-ProbeNotepad $Target
   $deadline = [DateTime]::UtcNow.AddSeconds(12)
+  $logged = $false
   do {
     $editor = Get-Process -Name Notepad -ErrorAction SilentlyContinue | Where-Object {
       $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -like "*$leaf*"
@@ -165,6 +169,10 @@ if ($Action -eq 'open') {
       [void][NotepadDesktop]::SetForegroundWindow($editor.MainWindowHandle)
     }
     if ($editor -and (Get-ForegroundId) -eq $editor.Id) {
+      if (!$logged) {
+        [Console]::Error.WriteLine("Notepad is foreground; checking the focused editor")
+        $logged = $true
+      }
       $focus = [System.Windows.Automation.AutomationElement]::FocusedElement
       if ($focus -and $focus.Current.ProcessId -eq $editor.Id -and
           ($focus.Current.ControlType -in @([System.Windows.Automation.ControlType]::Edit, [System.Windows.Automation.ControlType]::Document))) {
@@ -176,7 +184,10 @@ if ($Action -eq 'open') {
     }
     Start-Sleep -Milliseconds 100
   } while ([DateTime]::UtcNow -lt $deadline)
-  throw 'The disposable Notepad document did not gain editor focus.'
+  $processes = @(Get-Process -Name Notepad -ErrorAction SilentlyContinue | ForEach-Object {
+    "$($_.Id) session=$($_.SessionId) hwnd=$($_.MainWindowHandle) title=$($_.MainWindowTitle)"
+  })
+  throw "The disposable Notepad document did not gain editor focus. Notepad processes: $($processes -join '; '); foreground PID: $(Get-ForegroundId)"
 }
 
 if ((Get-ForegroundId) -ne [int]$Target) { throw 'The test Notepad window lost foreground focus.' }
