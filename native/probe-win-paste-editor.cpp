@@ -65,6 +65,7 @@ bool pipeForChild(DWORD which, HANDLE* result) {
 }
 
 int fail(std::string_view stage, DWORD error = 0) {
+    std::cerr << "Windows test editor could not start: " << stage << " (Win32 " << error << ")" << std::endl;
     std::cout << "{\"ready\":false,\"stage\":\"" << stage << '"';
     if (error) std::cout << ",\"win32Error\":" << error;
     std::cout << '}' << std::endl;

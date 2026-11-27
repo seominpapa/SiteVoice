@@ -45,21 +45,28 @@ int main() {
     const Window source, helper;
     const UINT chromium = RegisterClipboardFormatW(L"Chromium internal source URL");
     if (!source.value || !helper.value || !chromium) return 1;
+    bool reproduced = true;
     for (const auto format : {0u, chromium, 0u}) {
         if (!seed(source.value, format) || !originalPreserved(source.value, format)) {
             std::cerr << "INCONCLUSIVE: unable to seed clipboard" << std::endl;
             return 1;
         }
+        const auto before = GetClipboardSequenceNumber();
         Clipboard clipboard(helper.value);
         const bool staged = clipboard.stage(L"SiteVoice clipboard probe");
+        const auto after = GetClipboardSequenceNumber();
+        const bool helperIsOwner = GetClipboardOwner() == helper.value;
         const bool ownedAfterClose = clipboard.owned();
         const bool restored = clipboard.restore();
         const bool preserved = originalPreserved(source.value, format);
         std::cout << "format=" << (format ? "Chromium-internal-source-URL" : "plain") << std::boolalpha
                   << " staged=" << staged << " ownedAfterClose=" << ownedAfterClose
-                  << " restoreReported=" << restored << " originalPreserved=" << preserved << std::endl;
-        if (staged == (format != 0) || !preserved) return 1;
+                  << " restoreReported=" << restored << " originalPreserved=" << preserved
+                  << " sequenceBefore=" << before << " sequenceAfter=" << after
+                  << " helperIsOwner=" << helperIsOwner << std::endl;
+        reproduced &= format ? (!staged && preserved && before == after)
+                             : (staged && helperIsOwner && !ownedAfterClose && restored && !preserved);
     }
-    std::cout << "REPRODUCED: v0.2.11 stages plain clipboard content but rejects Chromium source URL metadata." << std::endl;
-    return 0;
+    if (reproduced) std::cout << "REPRODUCED: v0.2.11 loses its own clipboard marker after CloseClipboard with plain text; it separately rejects Chromium source URL metadata." << std::endl;
+    return reproduced ? 0 : 1;
 }

@@ -65,12 +65,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compare Windows clipboard staging using the exact release source
         id: clipboard-stage
-        continue-on-error: true
         shell: pwsh
         run: |
           & (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-clipboard.exe')
           exit $LASTEXITCODE
       - name: Compare plain text with Chromium source metadata in a separate editor process
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         shell: pwsh
         run: |
           node native/probe-win-paste.mjs (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-editor.exe') $env:SITEVOICE_HELPER
