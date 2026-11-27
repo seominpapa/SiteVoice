@@ -7,7 +7,7 @@
 | 운영체제 | 설치 파일 | 설치 방법 |
 | --- | --- | --- |
 | Mac · Apple Silicon | [Mac용 DMG 다운로드 (0.2.9)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.9/SiteVoice-0.2.9-mac-arm64.dmg) | DMG를 열고 SiteVoice를 응용 프로그램 폴더에 옮깁니다. |
-| Windows · x64 | [Windows용 EXE 다운로드 (0.2.10)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.10/SiteVoice-0.2.10-win-x64.exe) | 설치하거나 업데이트하려면 SiteVoice를 종료한 뒤 새 EXE를 실행합니다. |
+| Windows · x64 | [Windows용 EXE 다운로드 (0.2.11)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.11/SiteVoice-0.2.11-win-x64.exe) | 처음 설치하거나 v0.2.10 이하에서 업데이트하려면 SiteVoice를 종료한 뒤 EXE를 실행합니다. |
 
 [GitHub 릴리스 목록](https://github.com/seominpapa/SiteVoice/releases)에서 다른 버전도 확인할 수 있습니다. 설치 파일은 GitHub 로그인 없이 내려받을 수 있습니다. Windows 설치 파일에는 디지털 서명이 없습니다.
 
@@ -96,9 +96,11 @@ Electron E2E는 실행 중인 데스크톱 세션을 사용합니다. 임시 프
 
 **환경 설정 → 앱 업데이트**에서 시작 시 자동 확인을 켜거나 끌 수 있습니다. 자동 확인을 켜면 다음 실행 때 새 버전을 확인합니다. 새 버전이 있을 때만 설치 여부를 묻고, **업데이트 설치**를 선택한 경우 내려받아 적용합니다.
 
-SiteVoice의 Apple Silicon 배포본은 비공개 GitHub 릴리스에서 업데이트를 받습니다. 이 기능을 사용하려면 해당 저장소에 접근할 수 있는 계정으로 이 Mac의 GitHub CLI(`gh`)에 로그인해 두세요. 업데이트 기능이 없던 이전 설치본은 새 설치본으로 한 번 교체해야 합니다. 업데이트할 때는 응용 프로그램 폴더에 설치한 SiteVoice를 사용하세요.
+현재 Apple Silicon 배포본의 앱 내 업데이트를 사용하려면 이 Mac의 GitHub CLI(`gh`)에 로그인해 두세요. 설치 파일을 직접 내려받는 데는 로그인할 필요가 없습니다. 업데이트할 때는 응용 프로그램 폴더에 설치한 SiteVoice를 사용하세요.
 
-Windows에서는 새 버전의 EXE를 GitHub 릴리스에서 내려받아 설치합니다.
+Windows에서는 **v0.2.11부터** GitHub 로그인 없이 앱에서 업데이트를 확인할 수 있습니다. v0.2.10 이하 사용자는 새 EXE를 한 번 직접 실행해 덮어 설치하세요. 앱 안에서 업데이트를 승인하면 서명된 배포 정보와 EXE의 무결성을 확인한 뒤 설치합니다.
+
+Windows 배포 시 릴리스 초안에서 테스트가 끝난 EXE를 내려받아 내부 서명 키로 `node scripts/sign-windows-update.mjs <버전> <EXE 경로> <서명 키 경로>`를 실행합니다. 생성된 `sitevoice-win-x64-update.json`을 같은 릴리스에 올리고, Windows 전용 릴리스는 Mac 자동 업데이트를 위해 GitHub의 최신 릴리스로 표시하지 않습니다. 서명 키는 빌드 머신이나 저장소에 올리지 않습니다. 이 서명은 Windows의 Authenticode 서명과 별개입니다.
 
 이 저장소의 Apple Silicon 배포 파일은 아래 명령으로 만듭니다. Apple 공증 프로필과 같은 Apple 개발자 팀의 Developer ID Application 인증서가 필요합니다. 생성된 `latest-mac.yml`, ZIP·DMG와 관련 블록맵은 같은 GitHub 릴리스에 올립니다.
 
