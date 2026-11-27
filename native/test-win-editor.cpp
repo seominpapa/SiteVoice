@@ -5,6 +5,12 @@
 
 #include "win_editor.hpp"
 
+static WNDPROC editProcedure;
+static LRESULT CALLBACK withoutSelectionInfo(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == EM_GETSEL) return 0;
+    return CallWindowProcW(editProcedure, window, message, wparam, lparam);
+}
+
 int main() {
     const auto instance = GetModuleHandleW(nullptr);
     const auto dialog = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 400, 300,
@@ -34,6 +40,13 @@ int main() {
     }
     assert(check(make(L"EDIT", ES_PASSWORD)) == NativeEditor::blocked);
     assert(check(make(L"STATIC")) == NativeEditor::unknown);
+    const auto selectionUnavailable = make(L"EDIT");
+    editProcedure = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(selectionUnavailable, GWLP_WNDPROC,
+        reinterpret_cast<LONG_PTR>(withoutSelectionInfo)));
+    assert(editProcedure);
+    assert(check(selectionUnavailable) == NativeEditor::selectionUnavailable);
+    SendMessageW(selectionUnavailable, EM_SETREADONLY, TRUE, 0);
+    assert(check(selectionUnavailable) == NativeEditor::blocked);
     const auto multiline = make(L"EDIT", ES_MULTILINE);
     const std::wstring longText(70000, L'x');
     SendMessageW(multiline, EM_SETLIMITTEXT, longText.size(), 0);

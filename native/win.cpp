@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "win_editor.hpp"
+#include "win_editor_evidence.hpp"
 #include "win_shortcut.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -118,58 +119,120 @@ std::optional<DWORD> integrity(DWORD pid) {
     return *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
 }
 
-bool knownBoolean(IUIAutomationElement* element, PROPERTYID id, bool expected) {
+EditorReport booleanReport(IUIAutomation* automation, const VARIANT& value, HRESULT result, bool allowMixed = false) {
+    using R = EditorReport;
+    if (result == static_cast<HRESULT>(UIA_E_NOTSUPPORTED)) return R::missing;
+    if (FAILED(result)) return R::error;
+    if (value.vt == VT_BOOL) return value.boolVal != VARIANT_FALSE ? R::yes : R::no;
+    BOOL unsupported = FALSE;
+    if (SUCCEEDED(automation->CheckNotSupported(value, &unsupported)) && unsupported) return R::missing;
+    if (allowMixed && value.vt == VT_UNKNOWN && value.punkVal) {
+        ComPtr<IUnknown> mixed, actual;
+        if (SUCCEEDED(automation->get_ReservedMixedAttributeValue(&mixed)) && mixed &&
+            SUCCEEDED(value.punkVal->QueryInterface(IID_PPV_ARGS(&actual))) && mixed.Get() == actual.Get())
+            return R::mixed;
+    }
+    return R::error;
+}
+
+EditorReport property(IUIAutomation* automation, IUIAutomationElement* element, PROPERTYID id) {
     VARIANT value{};
-    const bool matched = SUCCEEDED(element->GetCurrentPropertyValueEx(id, TRUE, &value)) &&
-        value.vt == VT_BOOL && (value.boolVal != VARIANT_FALSE) == expected;
+    const auto result = element->GetCurrentPropertyValueEx(id, TRUE, &value);
+    const auto report = booleanReport(automation, value, result);
     VariantClear(&value);
-    return matched;
+    return report;
 }
 
-bool editable(IUIAutomationElement* element) {
-    CONTROLTYPEID type = 0;
-    if (FAILED(element->get_CurrentControlType(&type)) ||
-        (type != UIA_EditControlTypeId && type != UIA_DocumentControlTypeId && type != UIA_ComboBoxControlTypeId) ||
-        !knownBoolean(element, UIA_IsEnabledPropertyId, true) ||
-        !knownBoolean(element, UIA_HasKeyboardFocusPropertyId, true) ||
-        !knownBoolean(element, UIA_IsPasswordPropertyId, false)) return false;
-
+EditorReport valueReadOnly(IUIAutomationElement* element) {
+    using R = EditorReport;
     ComPtr<IUIAutomationValuePattern> value;
+    const auto result = element->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&value));
+    if (result == static_cast<HRESULT>(UIA_E_NOTSUPPORTED) || (SUCCEEDED(result) && !value)) return R::missing;
+    if (FAILED(result)) return R::error;
     BOOL readOnly = TRUE;
-    if (SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&value))) && value) {
-        return SUCCEEDED(value->get_CurrentIsReadOnly(&readOnly)) && !readOnly;
-    }
-    ComPtr<IUIAutomationTextPattern> text;
-    ComPtr<IUIAutomationTextRange> range;
-    if (FAILED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) || !text ||
-        FAILED(text->get_DocumentRange(&range)) || !range) return false;
-    VARIANT attribute{};
-    const auto result = range->GetAttributeValue(UIA_IsReadOnlyAttributeId, &attribute);
-    const bool writable = SUCCEEDED(result) && attribute.vt == VT_BOOL && attribute.boolVal == VARIANT_FALSE;
-    VariantClear(&attribute);
-    return writable;
+    if (FAILED(value->get_CurrentIsReadOnly(&readOnly))) return R::error;
+    return readOnly ? R::yes : R::no;
 }
 
-bool caretOnly(IUIAutomationElement* element) {
-    ComPtr<IUIAutomationTextPattern> text;
-    if (SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text) {
-        ComPtr<IUIAutomationTextRangeArray> selection;
-        ComPtr<IUIAutomationTextRange> range;
-        int count = 0;
-        int comparison = 0;
-        return SUCCEEDED(text->GetSelection(&selection)) && selection &&
-            SUCCEEDED(selection->get_Length(&count)) && count == 1 &&
-            SUCCEEDED(selection->GetElement(0, &range)) && range &&
-            SUCCEEDED(range->CompareEndpoints(TextPatternRangeEndpoint_Start, range.Get(),
-                                             TextPatternRangeEndpoint_End, &comparison)) && comparison == 0;
-    }
+EditorReport rangeReadOnly(IUIAutomation* automation, IUIAutomationTextRange* range) {
+    VARIANT value{};
+    const auto result = range->GetAttributeValue(UIA_IsReadOnlyAttributeId, &value);
+    const auto report = booleanReport(automation, value, result, true);
+    VariantClear(&value);
+    return report;
+}
 
-    return false;
+EditorReport documentReadOnly(IUIAutomation* automation, IUIAutomationTextPattern* text) {
+    ComPtr<IUIAutomationTextRange> range;
+    if (FAILED(text->get_DocumentRange(&range)) || !range) return EditorReport::error;
+    return rangeReadOnly(automation, range.Get());
+}
+
+ComPtr<IUIAutomationTextRange> collapsedSelection(IUIAutomationTextPattern* text) {
+    ComPtr<IUIAutomationTextRangeArray> selection;
+    ComPtr<IUIAutomationTextRange> range;
+    int count = 0, comparison = 0;
+    if (FAILED(text->GetSelection(&selection)) || !selection ||
+        FAILED(selection->get_Length(&count)) || count != 1 ||
+        FAILED(selection->GetElement(0, &range)) || !range ||
+        FAILED(range->CompareEndpoints(TextPatternRangeEndpoint_Start, range.Get(),
+                                       TextPatternRangeEndpoint_End, &comparison)) || comparison != 0)
+        return {};
+    return range;
+}
+
+bool activeCaretAt(IUIAutomationElement* element, IUIAutomationTextRange* selection) {
+    ComPtr<IUIAutomationTextPattern2> text;
+    ComPtr<IUIAutomationTextRange> caret;
+    BOOL active = FALSE, same = FALSE;
+    // An active caret also exists in some controls with a text selection.
+    // Require it to match the already collapsed selection of this element.
+    return SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&text))) && text &&
+        SUCCEEDED(text->GetCaretRange(&active, &caret)) && active && caret &&
+        SUCCEEDED(caret->Compare(selection, &same)) && same;
 }
 
 bool matchesNativeHandle(IUIAutomationElement* element, HWND expected) {
     UIA_HWND actual = nullptr;
     return SUCCEEDED(element->get_CurrentNativeWindowHandle(&actual)) && actual == expected;
+}
+
+bool uiaEditor(IUIAutomation* automation, IUIAutomationElement* element, NativeEditor native) {
+    using R = EditorReport;
+    CONTROLTYPEID type = 0;
+    if (FAILED(element->get_CurrentControlType(&type)) ||
+        (type != UIA_EditControlTypeId && type != UIA_DocumentControlTypeId && type != UIA_ComboBoxControlTypeId))
+        return false;
+    const UiaEditorEvidence evidence{
+        property(automation, element, UIA_IsEnabledPropertyId),
+        property(automation, element, UIA_HasKeyboardFocusPropertyId),
+        property(automation, element, UIA_IsPasswordPropertyId),
+        native == NativeEditor::writable || native == NativeEditor::selectionUnavailable
+    };
+    // Reject explicit negatives before talking to potentially slow text providers.
+    if (!allowsUiaEditorProbe(evidence)) return false;
+    const auto value = valueReadOnly(element);
+    if (value != R::no && value != R::missing) return false;
+    if (native == NativeEditor::writable) return true;
+    ComPtr<IUIAutomationTextPattern> text;
+    if (FAILED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) || !text) return false;
+    const auto selection = collapsedSelection(text.Get());
+    if (!selection) return false;
+    const bool needsCaret = evidence.focused == R::missing && !evidence.verifiedNativeEditor;
+    const bool active = needsCaret && activeCaretAt(element, selection.Get());
+    if (needsCaret && !active) return false;
+    const auto caret = rangeReadOnly(automation, selection.Get());
+    // A document can include read-only spans; only fall back to its metadata
+    // when neither the insertion point nor the value provider has an answer.
+    const auto document = caret == R::missing && value == R::missing
+        ? documentReadOnly(automation, text.Get()) : R::missing;
+    const auto writable = writableUiaEditor(value, caret, document);
+    if (!safeUiaEditor(evidence, active, true, writable)) return false;
+
+    // A selection can change without a focus event while querying the provider.
+    const auto current = collapsedSelection(text.Get());
+    BOOL same = FALSE;
+    return current && SUCCEEDED(selection->Compare(current.Get(), &same)) && same;
 }
 
 struct Target {
@@ -198,6 +261,7 @@ std::optional<Target> capture(IUIAutomation* automation, DWORD parent, bool watc
     target.nativeFocus = focusedWindow(thread);
     if (!target.pid || target.pid == parent || target.pid == GetCurrentProcessId() || !target.nativeFocus)
         return std::nullopt;
+    if (!IsWindowEnabled(target.window) || !IsWindowEnabled(target.nativeFocus)) return std::nullopt;
     const auto editor = nativeEditor(target.nativeFocus, target.window, target.pid);
     if (editor == NativeEditor::blocked) return std::nullopt;
     if (editor != NativeEditor::writable || !watchNativeFocus) {
@@ -205,10 +269,13 @@ std::optional<Target> capture(IUIAutomation* automation, DWORD parent, bool watc
             return std::nullopt;
         int pid = 0;
         const auto element = target.element.Get();
-        if (FAILED(element->get_CurrentProcessId(&pid)) || pid <= 0 || static_cast<DWORD>(pid) != target.pid ||
-            !editable(element)) return std::nullopt;
-        if (!(editor == NativeEditor::writable && matchesNativeHandle(element, target.nativeFocus)) &&
-            !caretOnly(element)) return std::nullopt;
+        if (FAILED(element->get_CurrentProcessId(&pid)) || pid <= 0 || static_cast<DWORD>(pid) != target.pid)
+            return std::nullopt;
+        const bool knownEditor = editor == NativeEditor::writable || editor == NativeEditor::selectionUnavailable;
+        const bool sameNativeControl = knownEditor && matchesNativeHandle(element, target.nativeFocus);
+        if ((editor == NativeEditor::selectionUnavailable && !sameNativeControl) ||
+            !uiaEditor(automation, element, sameNativeControl ? editor : NativeEditor::unknown))
+            return std::nullopt;
     }
     if (target.window != GetForegroundWindow() || target.nativeFocus != focusedWindow(thread)) return std::nullopt;
     return target;

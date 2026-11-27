@@ -1,0 +1,55 @@
+name: Test Windows dictation in Notepad
+
+on:
+  push:
+    branches: [codex/sitevoice-windows-e2e]
+
+permissions:
+  contents: read
+
+jobs:
+  notepad:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Build the native helper and verify editor rules
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Could not find the x64 Visual Studio C++ tools.' }
+          $build = Join-Path $env:RUNNER_TEMP 'build-sitevoice-editor.cmd'
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          call npm run native
+          if errorlevel 1 exit /b 1
+          node --test native/test.mjs
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-editor-evidence.cpp /Fe:"%RUNNER_TEMP%\sitevoice-editor-evidence.exe"
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-editor-evidence.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-editor.exe" user32.lib
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-win-editor.exe"
+          "@ | Set-Content -LiteralPath $build -Encoding ascii
+          & $build
+          exit $LASTEXITCODE
+      - name: Record with the global shortcut and verify Notepad content
+        env:
+          SITEVOICE_E2E_WINDOWS_DESKTOP: '1'
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx --no-install playwright test tests/e2e/windows-dictation.spec.ts
+          exit $LASTEXITCODE

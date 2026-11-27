@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <limits>
 
-enum class NativeEditor { unknown, blocked, writable };
+enum class NativeEditor { unknown, blocked, selectionUnavailable, writable };
 
 inline NativeEditor nativeEditor(HWND focus, HWND root, DWORD pid) {
     DWORD focusPid = 0;
@@ -40,6 +40,6 @@ inline NativeEditor nativeEditor(HWND focus, HWND root, DWORD pid) {
     DWORD_PTR ignored = 0;
     if (!SendMessageTimeoutW(focus, EM_GETSEL, reinterpret_cast<WPARAM>(&start),
                              reinterpret_cast<LPARAM>(&end), flags, 150, &ignored) ||
-        start == unset || start != end) return NativeEditor::blocked;
-    return NativeEditor::writable;
+        start == unset || end == unset) return NativeEditor::selectionUnavailable;
+    return start == end ? NativeEditor::writable : NativeEditor::blocked;
 }

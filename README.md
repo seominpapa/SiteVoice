@@ -114,6 +114,7 @@ VOICEINPUT_SIGNING=1 VOICEINPUT_GITHUB_UPDATES=1 APPLE_KEYCHAIN_PROFILE=SiteVoic
 
 - 단위 및 통합 테스트는 모의 API 요청, 상태 전이, 취소 후 늦은 응답, 전사 원문 보존, API 키 저장, IPC, 오디오 수집을 확인합니다.
 - Electron 자동화는 macOS에서 테스트 키가 앱 재시작 뒤에도 읽히는지와 가상 녹음부터 결과까지를 확인합니다. 이 테스트는 실제 마이크·접근성·외부 앱 붙여넣기 검증을 대신하지 않습니다.
+- Windows 자동 붙여넣기 테스트는 메모장을 닫은 별도 로그인 세션에서 실행합니다. x64 개발자 명령 프롬프트에서 `npm ci`, `npm run native`, `npm run build`를 실행하고, PowerShell에서 `$env:SITEVOICE_E2E_WINDOWS_DESKTOP='1'; npx playwright test tests/e2e/windows-dictation.spec.ts`를 실행합니다. F9로 녹음을 시작하고 끝낸 뒤 실제 메모장 커서에 문장이 들어가는지와 클립보드 복원을 확인합니다. 가상 마이크와 모의 전사 응답을 사용하므로 실제 마이크, OpenAI 전사 품질, 기본 Windows 로고 키는 별도로 확인해야 합니다.
 - 실기기 검증은 Mac의 TextEdit, Windows의 메모장에서 각각 시행합니다. (1) 권한 허용 후 마이크와 전역 키로 녹음하고 커서 위치에 결과가 들어가는지, (2) 처리 중 다른 입력 칸으로 이동하거나 영역을 선택하면 복사로 전환되는지, (3) 작업 취소/마이크 분리/절전 후 뒤늦게 붙여넣지 않는지, (4) 클립보드 내용을 그대로 보존하는지, (5) 창 닫기/트레이 완전 종료/재실행을 확인합니다. Windows는 NSIS 설치 및 제거도 확인합니다.
 
 구성: `src/main/`은 OS·키·IPC 관리, `src/core/`는 전사와 정리, `src/renderer/`는 한국어 화면과 녹음, `native/`는 macOS AX/Quartz 및 Windows UI Automation/SendInput 보조 프로그램입니다. 디자인은 제공된 DJI 분석 자료의 흰색·회색 표면, 얇은 구분선, 파란색 버튼을 참고했습니다. 밝은 테마와 차콜 배경의 어두운 테마를 제공합니다.
