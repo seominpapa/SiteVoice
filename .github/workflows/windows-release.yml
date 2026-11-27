@@ -26,6 +26,7 @@ jobs:
       - name: Check out source without persisting credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: refs/tags/${{ inputs.release_tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -43,7 +44,7 @@ jobs:
             throw 'The release tag must match the app version.'
           }
           $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:SITEVOICE_TAG" --jq .sha
-          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $env:GITHUB_SHA) {
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne (git rev-parse HEAD)) {
             throw 'The release tag must point to the commit being built.'
           }
           $release = gh release view $env:SITEVOICE_TAG --repo $env:GITHUB_REPOSITORY --json databaseId,isPrerelease,isImmutable,assets |
@@ -115,8 +116,11 @@ jobs:
               (Get-FileHash -LiteralPath 'native/bin/win32-x64/voice-target.exe').Hash) {
             throw 'Installed helper differs from the tested executable.'
           }
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($app.VersionInfo.ProductVersion -cne $version) { throw 'Installed app version is not the target version.' }
+          foreach ($file in 'SiteVoice.exe', 'resources\app.asar') {
+            $actual = Get-FileHash -LiteralPath (Join-Path $dest $file)
+            $expected = Get-FileHash -LiteralPath (Join-Path 'release\win-unpacked' $file)
+            if ($actual.Hash -cne $expected.Hash) { throw "Installed $file differs from the tested build." }
+          }
           $marker = Get-Content -LiteralPath (Join-Path $dest 'resources\build\windows-update.channel') -Raw
           if ($marker.Trim() -cne 'sitevoice-win-x64-v1') { throw 'Windows update channel is missing.' }
           Start-Sleep -Seconds 5
