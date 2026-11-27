@@ -87,6 +87,12 @@ jobs:
           cl /nologo /std:c++17 /EHsc native\test-win-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-editor.exe" user32.lib
           if errorlevel 1 exit /b 1
           "%RUNNER_TEMP%\sitevoice-win-editor.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /utf-8 /DUNICODE /D_UNICODE native\probe-win-clipboard.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-clipboard.exe" user32.lib gdi32.lib ole32.lib oleaut32.lib uiautomationcore.lib crypt32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-paste-clipboard.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 native\probe-win-paste-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-editor.exe" user32.lib advapi32.lib
           "@ | Set-Content -LiteralPath $build -Encoding ascii
           & $build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -96,9 +102,9 @@ jobs:
         run: |
           $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
           $dest = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmoke'
-          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.10-win-x64.exe'
-          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.10/SiteVoice-0.2.10-win-x64.exe' -OutFile $previous
-          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne 'bf236449b1a55026241b0f2b66520751914a26d40e05c6a334b3538ac2b0d9cc') {
+          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.11-win-x64.exe'
+          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.11/SiteVoice-0.2.11-win-x64.exe' -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '8981689c2167b9252bbe4e21bfdcc519d2dfc5035157ffef4d654911a98a660c') {
             throw 'The previous installer does not match its published digest.'
           }
           $install = Start-Process -FilePath $previous -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
@@ -129,6 +135,11 @@ jobs:
           foreach ($process in $processes) {
             Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
           }
+          $env:SITEVOICE_PROBE_STATUS = Join-Path $env:RUNNER_TEMP 'sitevoice-editor-status.log'
+          node native/probe-win-paste.mjs (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-editor.exe') $helper.FullName --expect-fixed
+          $probeResult = $LASTEXITCODE
+          if (Test-Path -LiteralPath $env:SITEVOICE_PROBE_STATUS) { Get-Content -LiteralPath $env:SITEVOICE_PROBE_STATUS }
+          if ($probeResult -ne 0) { throw 'The installed helper failed to insert text in the external Windows editor.' }
           $uninstaller = Get-Item -LiteralPath (Join-Path $dest 'Uninstall SiteVoice.exe')
           $remove = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
           if ($remove.ExitCode -ne 0 -or (Test-Path -LiteralPath $app.FullName)) { throw 'Uninstall failed.' }
