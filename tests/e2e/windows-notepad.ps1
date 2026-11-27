@@ -107,7 +107,9 @@ public static class NotepadDesktop {
     var startup = new StartupInfo { size = Marshal.SizeOf(typeof(StartupInfo)) };
     var command = new StringBuilder("\"" + app + "\" " + arguments);
     ProcessInfo child;
-    if (!CreateProcess(app, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, null, ref startup, out child))
+    const uint createSuspended = 0x00000004, createNoWindow = 0x08000000;
+    if (!CreateProcess(app, command, IntPtr.Zero, IntPtr.Zero, false, createSuspended | createNoWindow,
+      IntPtr.Zero, null, ref startup, out child))
       throw new Win32Exception();
     bool resumed = false;
     try {
@@ -209,7 +211,8 @@ if ($Action -eq 'open-uia') {
   $arguments = '"' + $Target + '" missing-both'
   $rid = [NotepadDesktop]::IntegrityRid($PID)
   if ($rid -gt 0 -and $rid -lt 0x3000) {
-    $childId = (Start-Process -FilePath $probe -ArgumentList $arguments -PassThru).Id
+    $childId = (Start-Process -FilePath $probe -ArgumentList $arguments -PassThru `
+      -RedirectStandardOutput "$Target.stdout" -RedirectStandardError "$Target.stderr").Id
   } elseif ($env:GITHUB_ACTIONS -eq 'true') {
     $childId = [NotepadDesktop]::StartMediumEditor($probe, $arguments)
   } else { throw 'Run the test from a standard Windows desktop.' }

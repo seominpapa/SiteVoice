@@ -344,7 +344,6 @@ int runEditor() {
     SendMessageW(fixture.editor, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
     showEditor(window, fixture.editor);
     if (!saveDocument(fixture.editor)) return 5;
-    std::cout << "ready" << std::endl;
     MSG message{};
     BOOL received = 0;
     while ((received = GetMessageW(&message, nullptr, 0, 0)) > 0) {
