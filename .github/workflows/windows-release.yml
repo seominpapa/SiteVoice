@@ -42,14 +42,19 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:SITEVOICE_TAG -cne "v$version") {
             throw 'The release tag must match the app version.'
           }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:SITEVOICE_TAG" |
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:SITEVOICE_TAG" --jq .sha
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $env:GITHUB_SHA) {
+            throw 'The release tag must point to the commit being built.'
+          }
+          $release = gh release view $env:SITEVOICE_TAG --repo $env:GITHUB_REPOSITORY --json databaseId,isPrerelease,isImmutable,assets |
             ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or !$release -or $release.draft -or $release.prerelease -or $release.immutable) {
-            throw 'The target must be an existing, published stable release that accepts new files.'
+          if ($LASTEXITCODE -ne 0 -or !$release.databaseId -or $release.isPrerelease -or $release.isImmutable) {
+            throw 'The target must be an existing release that accepts new files (draft or stable).'
           }
           $installerName = "SiteVoice-$version-win-x64.exe"
           if ($release.assets.name -contains $installerName) { throw 'The installer already exists.' }
           "SITEVOICE_INSTALLER=release/$installerName" >> $env:GITHUB_ENV
+          "SITEVOICE_RELEASE_ID=$($release.databaseId)" >> $env:GITHUB_ENV
 
       - name: Install dependencies and test application code
         run: |
@@ -77,6 +82,10 @@ jobs:
           cl /nologo /std:c++17 /EHsc native\test-win-shortcut.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
           if errorlevel 1 exit /b 1
           "%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-editor.exe" user32.lib
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-win-editor.exe"
           "@ | Set-Content -LiteralPath $build -Encoding ascii
           & $build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -116,7 +125,7 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           gh release upload $env:SITEVOICE_TAG $installer.FullName --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:SITEVOICE_TAG" | ConvertFrom-Json
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:SITEVOICE_RELEASE_ID" | ConvertFrom-Json
           $asset = $release.assets | Where-Object name -CEQ $installer.Name
           if ($LASTEXITCODE -ne 0 -or $asset.state -ne 'uploaded' -or $asset.size -ne $installer.Length -or $asset.digest -cne "sha256:$hash") {
             throw 'Published installer does not match the tested file.'

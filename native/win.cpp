@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "win_editor.hpp"
 #include "win_shortcut.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -37,9 +38,15 @@ constexpr std::array<int, 6> modifiers{VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, V
 constexpr auto pasteDelay = 450ms;
 using Revision = std::shared_ptr<std::atomic_uint64_t>;
 std::atomic_uint64_t foregroundRevision = 0;
+std::atomic_uint64_t nativeFocusRevision = 0;
 
 void CALLBACK windowChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
     ++foregroundRevision;
+}
+
+void CALLBACK nativeFocusChanged(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG, DWORD, DWORD) {
+    if (window && object != OBJID_CARET && GetAncestor(window, GA_ROOT) == GetForegroundWindow())
+        ++nativeFocusRevision;
 }
 
 void pumpMessages() {
@@ -143,7 +150,7 @@ bool editable(IUIAutomationElement* element) {
     return writable;
 }
 
-bool caretOnly(IUIAutomationElement* element, HWND nativeFocus) {
+bool caretOnly(IUIAutomationElement* element) {
     ComPtr<IUIAutomationTextPattern> text;
     if (SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text) {
         ComPtr<IUIAutomationTextRangeArray> selection;
@@ -157,15 +164,12 @@ bool caretOnly(IUIAutomationElement* element, HWND nativeFocus) {
                                              TextPatternRangeEndpoint_End, &comparison)) && comparison == 0;
     }
 
-    // Standard Win32 edit controls may expose ValuePattern without TextPattern.
-    UIA_HWND hwnd = nullptr;
-    wchar_t windowClass[16]{};
-    DWORD_PTR range = static_cast<DWORD_PTR>(-1);
-    return SUCCEEDED(element->get_CurrentNativeWindowHandle(&hwnd)) && hwnd == nativeFocus &&
-        GetClassNameW(nativeFocus, windowClass, ARRAYSIZE(windowClass)) &&
-        std::wstring_view(windowClass) == L"Edit" &&
-        SendMessageTimeoutW(nativeFocus, EM_GETSEL, 0, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, 150, &range) &&
-        range != static_cast<DWORD_PTR>(-1) && LOWORD(range) == HIWORD(range);
+    return false;
+}
+
+bool matchesNativeHandle(IUIAutomationElement* element, HWND expected) {
+    UIA_HWND actual = nullptr;
+    return SUCCEEDED(element->get_CurrentNativeWindowHandle(&actual)) && actual == expected;
 }
 
 struct Target {
@@ -174,25 +178,39 @@ struct Target {
     DWORD pid{};
     ComPtr<IUIAutomationElement> element;
     uint64_t foreground{};
+    uint64_t nativeRevision{};
     uint64_t focus{};
 };
 
-std::optional<Target> capture(IUIAutomation* automation, DWORD parent) {
+HWND focusedWindow(DWORD thread) {
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    return thread && GetGUIThreadInfo(thread, &info) &&
+        !(info.flags & (GUI_INMENUMODE | GUI_INMOVESIZE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE))
+        ? info.hwndFocus : nullptr;
+}
+
+std::optional<Target> capture(IUIAutomation* automation, DWORD parent, bool watchNativeFocus) {
     Target target;
     target.window = GetForegroundWindow();
     if (!target.window) return std::nullopt;
     const auto thread = GetWindowThreadProcessId(target.window, &target.pid);
-    GUITHREADINFO info{};
-    info.cbSize = sizeof(info);
-    if (!thread || !target.pid || target.pid == parent || target.pid == GetCurrentProcessId() ||
-        !GetGUIThreadInfo(thread, &info) || !info.hwndFocus ||
-        (info.flags & (GUI_INMENUMODE | GUI_INMOVESIZE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE))) return std::nullopt;
-    target.nativeFocus = info.hwndFocus;
-    if (FAILED(automation->GetFocusedElement(&target.element)) || !target.element) return std::nullopt;
-    int pid = 0;
-    if (FAILED(target.element->get_CurrentProcessId(&pid)) || pid <= 0 || static_cast<DWORD>(pid) != target.pid ||
-        !editable(target.element.Get()) || !caretOnly(target.element.Get(), target.nativeFocus) ||
-        target.window != GetForegroundWindow()) return std::nullopt;
+    target.nativeFocus = focusedWindow(thread);
+    if (!target.pid || target.pid == parent || target.pid == GetCurrentProcessId() || !target.nativeFocus)
+        return std::nullopt;
+    const auto editor = nativeEditor(target.nativeFocus, target.window, target.pid);
+    if (editor == NativeEditor::blocked) return std::nullopt;
+    if (editor != NativeEditor::writable || !watchNativeFocus) {
+        if (!automation || FAILED(automation->GetFocusedElement(&target.element)) || !target.element)
+            return std::nullopt;
+        int pid = 0;
+        const auto element = target.element.Get();
+        if (FAILED(element->get_CurrentProcessId(&pid)) || pid <= 0 || static_cast<DWORD>(pid) != target.pid ||
+            !editable(element)) return std::nullopt;
+        if (!(editor == NativeEditor::writable && matchesNativeHandle(element, target.nativeFocus)) &&
+            !caretOnly(element)) return std::nullopt;
+    }
+    if (target.window != GetForegroundWindow() || target.nativeFocus != focusedWindow(thread)) return std::nullopt;
     return target;
 }
 
@@ -366,26 +384,30 @@ class Bridge {
     const HWND owner = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     const HWINEVENTHOOK foreground = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
                                                         windowChanged, 0, 0, WINEVENT_OUTOFCONTEXT);
+    const HWINEVENTHOOK nativeFocus = SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS, nullptr,
+                                                     nativeFocusChanged, 0, 0, WINEVENT_OUTOFCONTEXT);
     const Revision focusRevision = std::make_shared<std::atomic_uint64_t>(0);
     ComPtr<IUIAutomation2> automation;
     ComPtr<IUIAutomationFocusChangedEventHandler> listener;
     std::optional<Target> target;
 
-    bool ready() const { return parent && owner && foreground && automation && listener; }
+    bool ready() const { return parent && owner && foreground && (nativeFocus || listener); }
 
     bool revisionsMatch(const Target& expected) const {
-        return foregroundRevision == expected.foreground && *focusRevision == expected.focus;
+        return foregroundRevision == expected.foreground && nativeFocusRevision == expected.nativeRevision &&
+            (!expected.element || *focusRevision == expected.focus);
     }
 
     bool checkFocus(const Target& expected) {
         pumpMessages();
         if (!revisionsMatch(expected)) return false;
-        const auto current = capture(automation.Get(), parent);
+        const auto current = capture(listener ? automation.Get() : nullptr, parent, nativeFocus != nullptr);
+        if (!current || current->window != expected.window || current->nativeFocus != expected.nativeFocus ||
+            current->pid != expected.pid || !!current->element != !!expected.element) return false;
         BOOL same = FALSE;
-        return current && current->window == expected.window && current->nativeFocus == expected.nativeFocus &&
-            current->pid == expected.pid &&
-            SUCCEEDED(automation->CompareElements(current->element.Get(), expected.element.Get(), &same)) &&
-            same && revisionsMatch(expected);
+        return (!expected.element ||
+            (SUCCEEDED(automation->CompareElements(current->element.Get(), expected.element.Get(), &same)) && same))
+            && revisionsMatch(expected);
     }
 
     const char* snapshot() {
@@ -393,13 +415,15 @@ class Bridge {
         if (!ready()) return "permission";
         pumpMessages();
         const auto win = foregroundRevision.load();
+        const auto native = nativeFocusRevision.load();
         const auto focus = focusRevision->load();
-        auto candidate = capture(automation.Get(), parent);
+        auto candidate = capture(listener ? automation.Get() : nullptr, parent, nativeFocus != nullptr);
         if (!candidate) return "target";
         const auto ours = integrity(GetCurrentProcessId());
         const auto theirs = integrity(candidate->pid);
         if (!ours || !theirs || *theirs > *ours || *theirs >= SECURITY_MANDATORY_HIGH_RID) return "permission";
         candidate->foreground = win;
+        candidate->nativeRevision = native;
         candidate->focus = focus;
         if (!checkFocus(*candidate)) return "target";
         target = std::move(candidate);
@@ -421,7 +445,12 @@ class Bridge {
             return (GetAsyncKeyState(key) & 0x8000) != 0;
         })) return "changed";
         if (!clipboard.owned()) return "clipboard";
-        if (!revisionsMatch(expected) || GetForegroundWindow() != expected.window) return "changed";
+        pumpMessages();
+        DWORD pid = 0;
+        const auto thread = GetWindowThreadProcessId(expected.window, &pid);
+        if (!revisionsMatch(expected) || GetForegroundWindow() != expected.window ||
+            pid != expected.pid || focusedWindow(thread) != expected.nativeFocus) return "changed";
+        if (!clipboard.owned()) return "clipboard";
 
         INPUT keys[4]{};
         for (auto& key : keys) key.type = INPUT_KEYBOARD;
@@ -454,6 +483,7 @@ public:
 
     ~Bridge() {
         if (listener) automation->RemoveFocusChangedEventHandler(listener.Get());
+        if (nativeFocus) UnhookWinEvent(nativeFocus);
         if (foreground) UnhookWinEvent(foreground);
         if (owner) DestroyWindow(owner);
     }
