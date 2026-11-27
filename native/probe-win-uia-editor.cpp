@@ -34,7 +34,8 @@ struct Fixture {
     HWND editor{};
     WNDPROC editProc{};
     Mode mode = Mode::standard;
-    ComPtr<IRawElementProviderSimple> provider;
+    ComPtr<IRawElementProviderSimple> providerRoot;
+    ComPtr<IRawElementProviderSimple> providerField;
 };
 Fixture fixture;
 
@@ -152,18 +153,24 @@ struct Range final : ITextRangeProvider {
     HRESULT STDMETHODCALLTYPE GetChildren(SAFEARRAY**) override { return E_NOTIMPL; }
 };
 
-struct EditorProvider final : IRawElementProviderSimple, ITextProvider2 {
+struct EditorProvider final : IRawElementProviderSimple, IRawElementProviderFragment,
+    IRawElementProviderFragmentRoot, ITextProvider2 {
     std::atomic_ulong refs{1};
     const HWND window;
+    const bool root;
 
-    explicit EditorProvider(HWND window) : window(window) {}
+    EditorProvider(HWND window, bool root) : window(window), root(root) {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
         if (id == __uuidof(IUnknown) || id == __uuidof(IRawElementProviderSimple))
             *out = static_cast<IRawElementProviderSimple*>(this);
-        else if (id == __uuidof(ITextProvider2) || id == __uuidof(ITextProvider))
+        else if (id == __uuidof(IRawElementProviderFragment))
+            *out = static_cast<IRawElementProviderFragment*>(this);
+        else if (root && id == __uuidof(IRawElementProviderFragmentRoot))
+            *out = static_cast<IRawElementProviderFragmentRoot*>(this);
+        else if (!root && (id == __uuidof(ITextProvider2) || id == __uuidof(ITextProvider)))
             *out = static_cast<ITextProvider2*>(this);
         else
             return E_NOINTERFACE;
@@ -182,11 +189,12 @@ struct EditorProvider final : IRawElementProviderSimple, ITextProvider2 {
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(IRawElementProviderSimple** out) override {
-        return UiaHostProviderFromHwnd(window, out);
+        *out = nullptr;
+        return root ? UiaHostProviderFromHwnd(window, out) : S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID id, IUnknown** out) override {
         *out = nullptr;
-        if (id == UIA_TextPatternId || id == UIA_TextPattern2Id) {
+        if (!root && (id == UIA_TextPatternId || id == UIA_TextPattern2Id)) {
             *out = static_cast<ITextProvider2*>(this);
             AddRef();
         }
@@ -194,17 +202,21 @@ struct EditorProvider final : IRawElementProviderSimple, ITextProvider2 {
     }
     HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID id, VARIANT* out) override {
         VariantInit(out);
-        if (omitted(fixture.mode, id)) {
-            // VT_EMPTY allows the HWND/default providers to supply a value.
-            // Return the reserved marker to reproduce a genuinely absent field.
+        if (!root && omitted(fixture.mode, id)) {
+            // The focused field is a virtual child with no HWND provider that
+            // can fill in a missing property from the real Edit control.
             out->vt = VT_UNKNOWN;
             return UiaGetReservedNotSupportedValue(&out->punkVal);
         }
         switch (id) {
         case UIA_ControlTypePropertyId:
             out->vt = VT_I4;
-            out->lVal = UIA_EditControlTypeId;
+            out->lVal = root ? UIA_PaneControlTypeId : UIA_EditControlTypeId;
             return S_OK;
+        case UIA_AutomationIdPropertyId:
+            out->vt = VT_BSTR;
+            out->bstrVal = SysAllocString(root ? L"SiteVoiceProbeHost" : L"SiteVoiceProbeField");
+            return out->bstrVal ? S_OK : E_OUTOFMEMORY;
         case UIA_ProcessIdPropertyId:
             out->vt = VT_I4;
             out->lVal = static_cast<LONG>(GetCurrentProcessId());
@@ -217,13 +229,66 @@ struct EditorProvider final : IRawElementProviderSimple, ITextProvider2 {
         case UIA_IsContentElementPropertyId:
             bool state = true;
             if (id == UIA_IsEnabledPropertyId) state = IsWindowEnabled(window) != FALSE;
-            if (id == UIA_HasKeyboardFocusPropertyId) state = activeEditor(window);
-            if (id == UIA_IsPasswordPropertyId) state = fixture.mode == Mode::password;
+            if (id == UIA_HasKeyboardFocusPropertyId) state = !root && activeEditor(window);
+            if (id == UIA_IsKeyboardFocusablePropertyId) state = !root;
+            if (id == UIA_IsPasswordPropertyId) state = !root && fixture.mode == Mode::password;
             out->vt = VT_BOOL;
             out->boolVal = state ? VARIANT_TRUE : VARIANT_FALSE;
             return S_OK;
         }
         return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE Navigate(NavigateDirection direction, IRawElementProviderFragment** out) override {
+        *out = nullptr;
+        if (root && (direction == NavigateDirection_FirstChild || direction == NavigateDirection_LastChild))
+            return fixture.providerField->QueryInterface(IID_PPV_ARGS(out));
+        if (!root && direction == NavigateDirection_Parent) return fixture.providerRoot->QueryInterface(IID_PPV_ARGS(out));
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY** out) override {
+        *out = nullptr;
+        if (root) return S_OK; // the HWND supplies the root identity
+        const auto array = SafeArrayCreateVector(VT_I4, 0, 2);
+        if (!array) return E_OUTOFMEMORY;
+        LONG index = 0;
+        LONG value = UiaAppendRuntimeId;
+        auto hr = SafeArrayPutElement(array, &index, &value);
+        if (SUCCEEDED(hr)) {
+            index = 1;
+            value = 1;
+            hr = SafeArrayPutElement(array, &index, &value);
+        }
+        if (FAILED(hr)) { SafeArrayDestroy(array); return hr; }
+        *out = array;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_BoundingRectangle(UiaRect* out) override {
+        RECT rect{};
+        if (!GetWindowRect(window, &rect)) return static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE);
+        *out = {static_cast<double>(rect.left), static_cast<double>(rect.top),
+            static_cast<double>(rect.right - rect.left), static_cast<double>(rect.bottom - rect.top)};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetEmbeddedFragmentRoots(SAFEARRAY** out) override { *out = nullptr; return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetFocus() override {
+        ::SetFocus(window);
+        return ::GetFocus() == window ? S_OK : E_FAIL;
+    }
+    HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot** out) override {
+        return fixture.providerRoot->QueryInterface(IID_PPV_ARGS(out));
+    }
+    HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double x, double y, IRawElementProviderFragment** out) override {
+        *out = nullptr;
+        UiaRect area{};
+        const auto hr = get_BoundingRectangle(&area);
+        if (FAILED(hr)) return hr;
+        return x >= area.left && x < area.left + area.width && y >= area.top && y < area.top + area.height
+            ? fixture.providerField->QueryInterface(IID_PPV_ARGS(out)) : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetFocus(IRawElementProviderFragment** out) override {
+        *out = nullptr;
+        return activeEditor(window) ? fixture.providerField->QueryInterface(IID_PPV_ARGS(out)) : S_OK;
     }
 
     HRESULT createRange(LONG start, LONG end, ITextRangeProvider** out) {
@@ -269,13 +334,16 @@ struct EditorProvider final : IRawElementProviderSimple, ITextProvider2 {
 
 LRESULT CALLBACK editWindowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     if (message == WM_GETOBJECT && static_cast<LONG>(lp) == UiaRootObjectId) {
-        if (!fixture.provider) fixture.provider.Attach(new (std::nothrow) EditorProvider(window));
-        return fixture.provider ? UiaReturnRawElementProvider(window, wp, lp, fixture.provider.Get()) : 0;
+        if (!fixture.providerRoot) fixture.providerRoot.Attach(new (std::nothrow) EditorProvider(window, true));
+        if (!fixture.providerField) fixture.providerField.Attach(new (std::nothrow) EditorProvider(window, false));
+        return fixture.providerRoot && fixture.providerField
+            ? UiaReturnRawElementProvider(window, wp, lp, fixture.providerRoot.Get()) : 0;
     }
     const auto result = CallWindowProcW(fixture.editProc, window, message, wp, lp);
     if (message == WM_DESTROY) {
         UiaReturnRawElementProvider(window, 0, 0, nullptr);
-        fixture.provider.Reset();
+        fixture.providerField.Reset();
+        fixture.providerRoot.Reset();
     }
     return result;
 }
@@ -361,6 +429,12 @@ bool inspectProperty(IUIAutomation* automation, IUIAutomationElement* editor, PR
         (SUCCEEDED(result) && SUCCEEDED(automation->CheckNotSupported(value, &unsupported)) && unsupported);
     const bool matched = omitted(fixture.mode, id) ? missing :
         SUCCEEDED(result) && value.vt == VT_BOOL && (value.boolVal != VARIANT_FALSE) == expected;
+    if (!matched) {
+        std::cerr << "Unexpected UIA property " << id << ": hr=0x" << std::hex << static_cast<unsigned long>(result)
+                  << std::dec << ", vt=" << value.vt << ", unsupported=" << unsupported
+                  << ", boolean=" << (value.vt == VT_BOOL ? static_cast<int>(value.boolVal) : 0)
+                  << ", expected-missing=" << omitted(fixture.mode, id) << ", expected-boolean=" << expected << '\n';
+    }
     VariantClear(&value);
     return matched;
 }
@@ -373,18 +447,28 @@ int inspectEditor() {
     gui.cbSize = sizeof(gui);
     if (!GetGUIThreadInfo(GetWindowThreadProcessId(root, nullptr), &gui) || gui.hwndFocus != editor) return 11;
     ComPtr<IUIAutomation> automation;
-    ComPtr<IUIAutomationElement> focused, expected;
+    ComPtr<IUIAutomationElement> focused, hosted, expected;
+    ComPtr<IUIAutomationTreeWalker> walker;
     BOOL same = FALSE;
     if (FAILED(CoCreateInstance(__uuidof(CUIAutomation8), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
         FAILED(automation->GetFocusedElement(&focused)) || !focused ||
-        FAILED(automation->ElementFromHandle(editor, &expected)) || !expected ||
-        FAILED(automation->CompareElements(focused.Get(), expected.Get(), &same)) || !same) return 12;
+        FAILED(automation->ElementFromHandle(editor, &hosted)) || !hosted ||
+        FAILED(automation->get_RawViewWalker(&walker)) || !walker ||
+        FAILED(walker->GetFirstChildElement(hosted.Get(), &expected)) || !expected ||
+        FAILED(automation->CompareElements(focused.Get(), expected.Get(), &same)) || !same) {
+        std::cerr << "Window host, accessibility child, or GetFocusedElement did not match: "
+                  << !!hosted << ", " << !!expected << ", " << !!focused << ", " << same << '\n';
+        return 12;
+    }
     CONTROLTYPEID type = 0;
-    if (FAILED(focused->get_CurrentControlType(&type)) || type != UIA_EditControlTypeId ||
-        !inspectProperty(automation.Get(), focused.Get(), UIA_IsEnabledPropertyId, true) ||
-        !inspectProperty(automation.Get(), focused.Get(), UIA_HasKeyboardFocusPropertyId, true) ||
-        !inspectProperty(automation.Get(), focused.Get(), UIA_IsPasswordPropertyId, fixture.mode == Mode::password))
+    const bool enabled = inspectProperty(automation.Get(), focused.Get(), UIA_IsEnabledPropertyId, true);
+    const bool focus = inspectProperty(automation.Get(), focused.Get(), UIA_HasKeyboardFocusPropertyId, true);
+    const bool password = inspectProperty(automation.Get(), focused.Get(), UIA_IsPasswordPropertyId, fixture.mode == Mode::password);
+    if (FAILED(focused->get_CurrentControlType(&type)) || type != UIA_EditControlTypeId) {
+        std::cerr << "Unexpected UIA control type: " << type << '\n';
         return 13;
+    }
+    if (!enabled || !focus || !password) return 13;
 
     ComPtr<IUIAutomationTextPattern> text;
     ComPtr<IUIAutomationTextRangeArray> selected;

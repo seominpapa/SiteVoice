@@ -208,7 +208,10 @@ function Start-ProbeNotepad([string]$Document) {
 if ($Action -eq 'open-uia') {
   $probe = $env:SITEVOICE_E2E_UIA_EDITOR
   if (!$probe -or ![IO.File]::Exists($probe) -or $Target.Contains('"')) { throw 'The test editor or document path is invalid.' }
-  $arguments = '"' + $Target + '" missing-both'
+  $mode = $env:SITEVOICE_E2E_UIA_MODE
+  if (!$mode) { $mode = 'missing-both' }
+  if ($mode -notin @('missing-enabled', 'missing-focus', 'missing-both')) { throw 'Unknown UI Automation fixture mode.' }
+  $arguments = '"' + $Target + '" ' + $mode
   $rid = [NotepadDesktop]::IntegrityRid($PID)
   if ($rid -gt 0 -and $rid -lt 0x3000) {
     $childId = (Start-Process -FilePath $probe -ArgumentList $arguments -PassThru `

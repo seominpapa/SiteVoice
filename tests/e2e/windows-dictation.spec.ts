@@ -84,8 +84,9 @@ async function verifyDictation(scenario: Scenario) {
     expect(editor.integrity, 'The target must run unelevated in an interactive desktop').toBeLessThan(0x3000)
     expect(editor.integrity, 'The target token integrity must be readable').toBeGreaterThan(0)
     if (probe) {
-      const { stdout } = await run(probe, ['--inspect', 'missing-both'], { windowsHide: true, timeout: 15_000 })
-      console.log(stdout.trim())
+      const mode = process.env.SITEVOICE_E2E_UIA_MODE ?? 'missing-both'
+      const { stdout } = await run(probe, ['--inspect', mode], { windowsHide: true, timeout: 15_000 })
+      console.log(`UI Automation check (${mode}): ${stdout.trim()}`)
     }
     const readText = async () => probe ? (await readFile(document, 'utf8')).trimEnd() : JSON.parse(await desktop('read', pid)) as string
     expect(await readText()).toBe(original)
