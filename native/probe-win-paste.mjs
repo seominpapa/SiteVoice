@@ -14,8 +14,12 @@ function connect(path, args = []) {
   const exit = once(child, 'close').catch(error => [null, error.message])
   child.stdin.on('error', () => {})
   let pending
+  const queued = []
   lines.on('line', line => {
-    if (!pending) return
+    if (!pending) {
+      queued.push(line)
+      return
+    }
     const { resolve, reject, timer } = pending
     pending = undefined
     clearTimeout(timer)
@@ -23,6 +27,10 @@ function connect(path, args = []) {
   })
   async function receive(command) {
     assert.ok(!pending, 'Only one command may be in flight')
+    if (queued.length) {
+      assert.equal(command, undefined, `Unexpected response from ${path}`)
+      return JSON.parse(queued.shift())
+    }
     const response = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending = undefined
@@ -54,12 +62,13 @@ const originalText = 'before [] after'
 const sample = 'SiteVoice 붙여넣기 테스트'
 const expectedText = `before [${sample}] after`
 const editor = connect(editorExe, ['--isolated-clipboard'])
-const helper = connect(helperExe)
+let helper
 const results = []
 try {
   const ready = await editor.receive()
   assert.equal(ready.ready, true, `Editor setup failed: ${JSON.stringify(ready)}`)
   console.log(JSON.stringify({ editorReady: ready }))
+  helper = connect(helperExe)
   for (const condition of ['PLAIN', 'CHROME', 'PLAIN']) {
     const fixture = await editor.receive(condition)
     assert.equal(fixture.ok, true, `Could not seed ${condition}: ${JSON.stringify(fixture)}`)
@@ -74,7 +83,7 @@ try {
     results.push(row)
   }
 } finally {
-  await Promise.all([helper.stop(), editor.stop()])
+  await Promise.all([helper?.stop(), editor.stop()])
 }
 
 const [first, chrome, last] = results
