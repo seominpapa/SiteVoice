@@ -17,7 +17,10 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type @'
 using System;
+using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class NotepadDesktop {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out int process);
@@ -29,6 +32,62 @@ public static class NotepadDesktop {
   [DllImport("advapi32.dll")] private static extern bool GetTokenInformation(IntPtr token, int type, IntPtr data, int bytes, out int written);
   [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
   [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool SetTokenInformation(IntPtr token, int type, ref MandatoryLabel label, int size);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool ConvertStringSidToSid(string text, out IntPtr sid);
+  [DllImport("advapi32.dll")] private static extern int GetLengthSid(IntPtr sid);
+  [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr value);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CreateProcess(string app, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes,
+    bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInfo process);
+  [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr process, uint code);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct MandatoryLabel { public IntPtr sid; public uint attributes; }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct StartupInfo {
+    public int size;
+    public IntPtr reserved, desktop, title;
+    public int x, y, width, height, columns, rows, fill, flags;
+    public short show, reservedBytes;
+    public IntPtr reservedData, stdin, stdout, stderr;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
+
+  // GitHub may have only an elevated desktop. Lower only the new, suspended
+  // stock Notepad child before any of its own code runs; leave policy unchanged.
+  public static void StartMediumNotepad(string document) {
+    var app = Path.Combine(Environment.SystemDirectory, "notepad.exe");
+    if (document.IndexOf('"') >= 0 || !File.Exists(document)) throw new ArgumentException("Expected the temporary Notepad document");
+    var startup = new StartupInfo { size = Marshal.SizeOf(typeof(StartupInfo)) };
+    var command = new StringBuilder("\"" + app + "\" \"" + document + "\"");
+    ProcessInfo child;
+    if (!CreateProcess(app, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, null, ref startup, out child))
+      throw new Win32Exception();
+    bool resumed = false;
+    try {
+      IntPtr token;
+      if (!OpenProcessToken(child.process, 0x88, out token)) throw new Win32Exception(); // TOKEN_ADJUST_DEFAULT | TOKEN_QUERY
+      try {
+        IntPtr sid;
+        if (!ConvertStringSidToSid("S-1-16-8192", out sid)) throw new Win32Exception();
+        try {
+          var label = new MandatoryLabel { sid = sid, attributes = 0x20 }; // SE_GROUP_INTEGRITY
+          if (!SetTokenInformation(token, 25, ref label, Marshal.SizeOf(typeof(MandatoryLabel)) + GetLengthSid(sid)))
+            throw new Win32Exception();
+          if (IntegrityRid(child.pid) != 0x2000) throw new InvalidOperationException("Notepad did not get medium integrity");
+        } finally { LocalFree(sid); }
+      } finally { CloseHandle(token); }
+      if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception();
+      resumed = true;
+    } finally {
+      if (!resumed) TerminateProcess(child.process, 1);
+      CloseHandle(child.thread);
+      CloseHandle(child.process);
+    }
+  }
 
   public static int IntegrityRid(int pid) {
     IntPtr process = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
@@ -75,7 +134,11 @@ function Start-ProbeNotepad([string]$Document) {
     $rid = [NotepadDesktop]::IntegrityRid($_.Id)
     $_.SessionId -eq $session -and $rid -gt 0 -and $rid -lt 0x3000
   } | Select-Object -First 1
-  if (!$explorer) { throw 'No unelevated Explorer desktop is available. Run the test from an interactive standard Windows desktop.' }
+  if (!$explorer) {
+    if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Run the test from a standard Windows desktop.' }
+    [NotepadDesktop]::StartMediumNotepad($Document)
+    return
+  }
   try {
     $shell = New-Object -ComObject Shell.Application
     $loc = 0
