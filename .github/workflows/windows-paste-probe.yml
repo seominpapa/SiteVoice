@@ -1,0 +1,61 @@
+name: Reproduce SiteVoice 0.2.11 Windows paste
+
+on:
+  push:
+    branches: [codex/sitevoice-win-paste-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  paste-probe:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      GH_PROMPT_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify and install the published 0.2.11 asset on the disposable runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = 'SiteVoice-0.2.11-win-x64.exe'
+          gh release download v0.2.11 --repo seominpapa/SiteVoice --pattern $asset --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = Join-Path $env:RUNNER_TEMP $asset
+          if ((Get-FileHash -LiteralPath $installer).Hash.ToLowerInvariant() -cne '8981689c2167b9252bbe4e21bfdcc519d2dfc5035157ffef4d654911a98a660c') {
+            throw 'The downloaded file differs from the published 0.2.11 installer.'
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'SiteVoicePasteProbe'
+          $process = Start-Process -FilePath $installer -ArgumentList '/S', '/currentuser', "/D=$dir" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installation failed ($($process.ExitCode))." }
+          $helper = Join-Path $dir 'resources\targets\win32-x64\voice-target.exe'
+          if (!(Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'Installed native helper not found.' }
+          "SITEVOICE_HELPER=$helper" >> $env:GITHUB_ENV
+      - name: Build the native test editor
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Could not find the x64 Visual Studio C++ tools.' }
+          $build = Join-Path $env:RUNNER_TEMP 'build-sitevoice-probe.cmd'
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 native\probe-win-paste-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-editor.exe" user32.lib advapi32.lib
+          "@ | Set-Content -LiteralPath $build -Encoding ascii
+          & $build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compare plain text with Chromium source metadata in a separate editor process
+        shell: pwsh
+        run: |
+          node native/probe-win-paste.mjs (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-editor.exe') $env:SITEVOICE_HELPER
+          exit $LASTEXITCODE
