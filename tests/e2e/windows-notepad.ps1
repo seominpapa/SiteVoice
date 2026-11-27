@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory = $true)][ValidateSet('open', 'shortcut', 'read', 'close')][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet('open', 'open-uia', 'shortcut', 'read', 'close')][string]$Action,
   [Parameter(Mandatory = $true)][string]$Target
 )
 
@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 if ($Action -eq 'close') {
   $owned = Get-Process -Id ([int]$Target) -ErrorAction SilentlyContinue
-  if ($owned -and $owned.ProcessName -eq 'Notepad') { Stop-Process -InputObject $owned }
+  if ($owned -and $owned.ProcessName -in @('Notepad', 'sitevoice-uia-editor')) { Stop-Process -InputObject $owned }
   exit
 }
 
@@ -102,12 +102,10 @@ public static class NotepadDesktop {
   private struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
 
   // GitHub may have only an elevated desktop. Lower only the new, suspended
-  // stock Notepad child before any of its own code runs; leave policy unchanged.
-  public static int StartMediumNotepad(string document) {
-    var app = Path.Combine(Environment.SystemDirectory, "notepad.exe");
-    if (document.IndexOf('"') >= 0 || !File.Exists(document)) throw new ArgumentException("Expected the temporary Notepad document");
+  // test editor child before any of its own code runs; leave policy unchanged.
+  public static int StartMediumEditor(string app, string arguments) {
     var startup = new StartupInfo { size = Marshal.SizeOf(typeof(StartupInfo)) };
-    var command = new StringBuilder("\"" + app + "\" \"" + document + "\"");
+    var command = new StringBuilder("\"" + app + "\" " + arguments);
     ProcessInfo child;
     if (!CreateProcess(app, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, null, ref startup, out child))
       throw new Win32Exception();
@@ -122,7 +120,7 @@ public static class NotepadDesktop {
           var label = new MandatoryLabel { sid = sid, attributes = 0x20 }; // SE_GROUP_INTEGRITY
           if (!SetTokenInformation(token, 25, ref label, Marshal.SizeOf(typeof(MandatoryLabel)) + GetLengthSid(sid)))
             throw new Win32Exception();
-          if (IntegrityRid(child.pid) != 0x2000) throw new InvalidOperationException("Notepad did not get medium integrity");
+          if (IntegrityRid(child.pid) != 0x2000) throw new InvalidOperationException("The test editor did not get medium integrity");
         } finally { LocalFree(sid); }
       } finally { CloseHandle(token); }
       if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception();
@@ -189,7 +187,7 @@ function Start-ProbeNotepad([string]$Document) {
   } | Select-Object -First 1
   if (!$explorer) {
     if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Run the test from a standard Windows desktop.' }
-    $childId = [NotepadDesktop]::StartMediumNotepad($Document)
+    $childId = [NotepadDesktop]::StartMediumEditor($notepad, $argument)
     [Console]::Error.WriteLine("Started stock Notepad: PID $childId")
     return
   }
@@ -202,6 +200,40 @@ function Start-ProbeNotepad([string]$Document) {
     $desktop.Document.Application.ShellExecute($notepad, $argument, '', 'open', 1)
   } catch {
     throw "Notepad could not be launched through the unelevated desktop shell: $($_.Exception.Message)"
+  }
+}
+
+if ($Action -eq 'open-uia') {
+  $probe = $env:SITEVOICE_E2E_UIA_EDITOR
+  if (!$probe -or ![IO.File]::Exists($probe) -or $Target.Contains('"')) { throw 'The test editor or document path is invalid.' }
+  $arguments = '"' + $Target + '" missing-both'
+  $rid = [NotepadDesktop]::IntegrityRid($PID)
+  if ($rid -gt 0 -and $rid -lt 0x3000) {
+    $childId = (Start-Process -FilePath $probe -ArgumentList $arguments -PassThru).Id
+  } elseif ($env:GITHUB_ACTIONS -eq 'true') {
+    $childId = [NotepadDesktop]::StartMediumEditor($probe, $arguments)
+  } else { throw 'Run the test from a standard Windows desktop.' }
+  try {
+    $deadline = [DateTime]::UtcNow.AddSeconds(12)
+    do {
+      $editor = Get-Process -Id $childId
+      if ($editor.MainWindowHandle -ne [IntPtr]::Zero -and (Get-ForegroundId) -ne $childId) {
+        [void][NotepadDesktop]::SetForegroundWindow($editor.MainWindowHandle)
+      }
+      if ((Get-ForegroundId) -eq $childId -and [IO.File]::Exists($Target)) {
+        $focused = [NotepadDesktop]::FocusedWindow($childId)
+        if ($focused -ne [IntPtr]::Zero -and $focused -ne $editor.MainWindowHandle) {
+          @{pid = $childId; integrity = [NotepadDesktop]::IntegrityRid($childId); className = [NotepadDesktop]::WindowClass($focused)} |
+            ConvertTo-Json -Compress
+          exit
+        }
+      }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "The external editor did not get focus. Test PID: $childId; foreground PID: $(Get-ForegroundId)"
+  } catch {
+    Stop-Process -Id $childId -ErrorAction SilentlyContinue
+    throw
   }
 }
 
@@ -248,7 +280,7 @@ if ($Action -eq 'open') {
   throw "The disposable Notepad document did not gain editor focus. Notepad processes: $($processes -join '; '); foreground PID: $(Get-ForegroundId)"
 }
 
-if ((Get-ForegroundId) -ne [int]$Target) { throw 'The test Notepad window lost foreground focus.' }
+if ((Get-ForegroundId) -ne [int]$Target) { throw 'The test editor lost foreground focus.' }
 if ($Action -eq 'shortcut') {
   [NotepadDesktop]::keybd_event(0x78, 0, 0, [UIntPtr]::Zero) # VK_F9 down
   [NotepadDesktop]::keybd_event(0x78, 0, 2, [UIntPtr]::Zero) # KEYEVENTF_KEYUP

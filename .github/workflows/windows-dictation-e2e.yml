@@ -1,4 +1,4 @@
-name: Test Windows dictation in Notepad
+name: Test Windows desktop dictation
 
 on:
   push:
@@ -10,10 +10,11 @@ permissions:
 jobs:
   notepad:
     runs-on: windows-2025
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -26,6 +27,13 @@ jobs:
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vs) { throw 'Could not find the x64 Visual Studio C++ tools.' }
+          $baseline = Join-Path $env:RUNNER_TEMP 'published-helper'
+          New-Item -Path $baseline -ItemType Directory | Out-Null
+          foreach ($file in @('win.cpp', 'win_editor.hpp', 'win_shortcut.hpp')) {
+            $source = git show "v0.2.12:native/$file"
+            if ($LASTEXITCODE -ne 0) { throw "Could not read v0.2.12 native source: $file" }
+            $source | Set-Content -LiteralPath (Join-Path $baseline $file) -Encoding utf8
+          }
           $build = Join-Path $env:RUNNER_TEMP 'build-sitevoice-editor.cmd'
           @"
           @echo off
@@ -42,14 +50,32 @@ jobs:
           cl /nologo /std:c++17 /EHsc native\test-win-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-editor.exe" user32.lib
           if errorlevel 1 exit /b 1
           "%RUNNER_TEMP%\sitevoice-win-editor.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-shortcut.cpp /Fe:"%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-win-shortcut.exe"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /utf-8 native\probe-win-uia-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-uia-editor.exe" User32.lib Gdi32.lib Ole32.lib OleAut32.lib Uiautomationcore.lib Advapi32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /utf-8 /DUNICODE /D_UNICODE "$baseline\win.cpp" /Fe:"$baseline\voice-target.exe" User32.lib Gdi32.lib Ole32.lib OleAut32.lib Uiautomationcore.lib Crypt32.lib Advapi32.lib
+          if errorlevel 1 exit /b 1
           "@ | Set-Content -LiteralPath $build -Encoding ascii
           & $build
-          exit $LASTEXITCODE
-      - name: Record with the global shortcut and verify Notepad content
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SITEVOICE_E2E_UIA_EDITOR=$(Join-Path $env:RUNNER_TEMP 'sitevoice-uia-editor.exe')" >> $env:GITHUB_ENV
+      - name: Record and verify automatic paste in Notepad and the external editor
         env:
           SITEVOICE_E2E_WINDOWS_DESKTOP: '1'
         run: |
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx --no-install playwright test tests/e2e/windows-dictation.spec.ts
+          npx --no-install playwright test tests/e2e/windows-dictation.spec.ts --grep "Windows F9"
+          exit $LASTEXITCODE
+      - name: Verify the old helper falls back to copy in the same external editor
+        env:
+          SITEVOICE_E2E_WINDOWS_DESKTOP: '1'
+          SITEVOICE_E2E_PUBLISHED_HELPER: '1'
+        run: |
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'published-helper\voice-target.exe') native\bin\win32-x64\voice-target.exe -Force
+          npx --no-install playwright test tests/e2e/windows-dictation.spec.ts --grep "Windows published native helper"
           exit $LASTEXITCODE
