@@ -26,6 +26,51 @@ public static class NotepadDesktop {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out int process);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+  [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint id, ref GuiInfo info);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+  private static extern IntPtr ReadMessage(IntPtr window, uint message, UIntPtr length, StringBuilder buffer,
+    uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+  private static extern IntPtr SetMessage(IntPtr window, uint message, UIntPtr start, IntPtr end,
+    uint flags, uint timeout, out UIntPtr result);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct GuiInfo {
+    public int bytes;
+    public uint flags;
+    public IntPtr active, focus, capture, menuOwner, moveSize, caret;
+    public int left, top, right, bottom;
+  }
+
+  public static IntPtr FocusedWindow(int expectedPid) {
+    int pid;
+    uint thread = GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+    if (thread == 0 || pid != expectedPid) return IntPtr.Zero;
+    var info = new GuiInfo { bytes = Marshal.SizeOf(typeof(GuiInfo)) };
+    if (!GetGUIThreadInfo(thread, ref info) || info.focus == IntPtr.Zero) return IntPtr.Zero;
+    GetWindowThreadProcessId(info.focus, out pid);
+    return pid == expectedPid ? info.focus : IntPtr.Zero;
+  }
+
+  public static string WindowClass(IntPtr window) {
+    var name = new StringBuilder(128);
+    return GetClassName(window, name, name.Capacity) > 0 ? name.ToString() : "";
+  }
+
+  public static void MoveProbeCaret(IntPtr window) {
+    UIntPtr ignored;
+    if (SetMessage(window, 0x00B1, (UIntPtr)8, (IntPtr)8, 3, 500, out ignored) == IntPtr.Zero)
+      throw new InvalidOperationException("Notepad did not accept the test caret position.");
+  }
+
+  public static string ReadProbeDocument(IntPtr window) {
+    var buffer = new StringBuilder(512);
+    UIntPtr ignored;
+    if (ReadMessage(window, 0x000D, (UIntPtr)buffer.Capacity, buffer, 3, 500, out ignored) == IntPtr.Zero)
+      throw new InvalidOperationException("Notepad document did not respond to WM_GETTEXT.");
+    return buffer.ToString();
+  }
   [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
   [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
   [DllImport("advapi32.dll")] private static extern bool OpenProcessToken(IntPtr process, uint rights, out IntPtr token);
@@ -119,6 +164,12 @@ function Get-ForegroundId {
   $foreground
 }
 
+function Get-NotepadEditWindow([int]$ProcessId) {
+  $window = [NotepadDesktop]::FocusedWindow($ProcessId)
+  if ($window -ne [IntPtr]::Zero -and [NotepadDesktop]::WindowClass($window) -match '^(Edit|RichEdit.*)$') { $window }
+  else { [IntPtr]::Zero }
+}
+
 function Start-ProbeNotepad([string]$Document) {
   $notepad = "$env:SystemRoot\System32\notepad.exe"
   $argument = '"' + $Document + '"'
@@ -173,6 +224,13 @@ if ($Action -eq 'open') {
         [Console]::Error.WriteLine("Notepad is foreground; checking the focused editor")
         $logged = $true
       }
+      $editWindow = Get-NotepadEditWindow $editor.Id
+      if ($editWindow -ne [IntPtr]::Zero) {
+        [NotepadDesktop]::MoveProbeCaret($editWindow)
+        @{pid = $editor.Id; integrity = [NotepadDesktop]::IntegrityRid($editor.Id); className = [NotepadDesktop]::WindowClass($editWindow)} |
+          ConvertTo-Json -Compress
+        exit
+      }
       $focus = [System.Windows.Automation.AutomationElement]::FocusedElement
       if ($focus -and $focus.Current.ProcessId -eq $editor.Id -and
           ($focus.Current.ControlType -in @([System.Windows.Automation.ControlType]::Edit, [System.Windows.Automation.ControlType]::Document))) {
@@ -194,6 +252,13 @@ if ((Get-ForegroundId) -ne [int]$Target) { throw 'The test Notepad window lost f
 if ($Action -eq 'shortcut') {
   [NotepadDesktop]::keybd_event(0x78, 0, 0, [UIntPtr]::Zero) # VK_F9 down
   [NotepadDesktop]::keybd_event(0x78, 0, 2, [UIntPtr]::Zero) # KEYEVENTF_KEYUP
+  exit
+}
+
+$editWindow = Get-NotepadEditWindow ([int]$Target)
+if ($editWindow -ne [IntPtr]::Zero) {
+  $value = [NotepadDesktop]::ReadProbeDocument($editWindow)
+  ConvertTo-Json -InputObject ($value.TrimEnd([char[]]"`r`n")) -Compress
   exit
 }
 
