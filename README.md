@@ -7,9 +7,9 @@
 | 운영체제 | 설치 파일 | 설치 방법 |
 | --- | --- | --- |
 | Mac · Apple Silicon | [Mac용 DMG 다운로드 (0.2.9)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.9/SiteVoice-0.2.9-mac-arm64.dmg) | DMG를 열고 SiteVoice를 응용 프로그램 폴더에 옮깁니다. |
-| Windows · x64 | [Windows용 EXE 다운로드 (0.2.9)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.9/SiteVoice-0.2.9-win-x64.exe) | EXE를 실행하고 설치 안내를 따릅니다. |
+| Windows · x64 | [Windows용 EXE 다운로드 (0.2.10)](https://github.com/seominpapa/SiteVoice/releases/download/v0.2.10/SiteVoice-0.2.10-win-x64.exe) | 설치하거나 업데이트하려면 SiteVoice를 종료한 뒤 새 EXE를 실행합니다. |
 
-[GitHub 릴리스 목록](https://github.com/seominpapa/SiteVoice/releases)에서 다른 버전도 확인할 수 있습니다. 이 저장소는 비공개이므로 접근 권한이 있는 GitHub 계정으로 로그인해야 내려받을 수 있습니다. Windows 설치 파일에는 디지털 서명이 없습니다.
+[GitHub 릴리스 목록](https://github.com/seominpapa/SiteVoice/releases)에서 다른 버전도 확인할 수 있습니다. 설치 파일은 GitHub 로그인 없이 내려받을 수 있습니다. Windows 설치 파일에는 디지털 서명이 없습니다.
 
 ## 데스크톱 앱으로 만든 이유
 
