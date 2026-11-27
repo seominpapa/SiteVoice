@@ -88,6 +88,10 @@ jobs:
           if errorlevel 1 exit /b 1
           "%RUNNER_TEMP%\sitevoice-win-editor.exe"
           if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc native\test-win-editor-evidence.cpp /Fe:"%RUNNER_TEMP%\sitevoice-editor-evidence.exe"
+          if errorlevel 1 exit /b 1
+          "%RUNNER_TEMP%\sitevoice-editor-evidence.exe"
+          if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /EHsc /utf-8 /DUNICODE /D_UNICODE native\probe-win-clipboard.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-clipboard.exe" user32.lib gdi32.lib ole32.lib oleaut32.lib uiautomationcore.lib crypt32.lib advapi32.lib
           if errorlevel 1 exit /b 1
           "%RUNNER_TEMP%\sitevoice-paste-clipboard.exe"
@@ -102,9 +106,9 @@ jobs:
         run: |
           $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
           $dest = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmoke'
-          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.11-win-x64.exe'
-          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.11/SiteVoice-0.2.11-win-x64.exe' -OutFile $previous
-          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '8981689c2167b9252bbe4e21bfdcc519d2dfc5035157ffef4d654911a98a660c') {
+          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.12-win-x64.exe'
+          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.12/SiteVoice-0.2.12-win-x64.exe' -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '307f9584db60f74c74ce07789073135dfca04d0a4b7dae9f82e2e1660f292cc2') {
             throw 'The previous installer does not match its published digest.'
           }
           $install = Start-Process -FilePath $previous -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
