@@ -63,19 +63,23 @@ jobs:
           & $build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SITEVOICE_E2E_UIA_EDITOR=$(Join-Path $env:RUNNER_TEMP 'sitevoice-uia-editor.exe')" >> $env:GITHUB_ENV
+      - name: Build the desktop application
+        id: bundle
+        run: npm run build
       - name: Record and verify automatic paste in Notepad and the external editor
         env:
           SITEVOICE_E2E_WINDOWS_DESKTOP: '1'
         run: |
-          npm run build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!$env:SITEVOICE_E2E_UIA_EDITOR -or !(Test-Path -LiteralPath $env:SITEVOICE_E2E_UIA_EDITOR -PathType Leaf)) { throw 'UI Automation test editor is missing.' }
           npx --no-install playwright test tests/e2e/windows-dictation.spec.ts --grep "Windows F9"
           exit $LASTEXITCODE
       - name: Verify the old helper falls back to copy in the same external editor
+        if: ${{ !cancelled() && steps.bundle.outcome == 'success' }}
         env:
           SITEVOICE_E2E_WINDOWS_DESKTOP: '1'
           SITEVOICE_E2E_PUBLISHED_HELPER: '1'
         run: |
-          Copy-Item (Join-Path $env:RUNNER_TEMP 'published-helper\voice-target.exe') native\bin\win32-x64\voice-target.exe -Force
+          if (!$env:SITEVOICE_E2E_UIA_EDITOR -or !(Test-Path -LiteralPath $env:SITEVOICE_E2E_UIA_EDITOR -PathType Leaf)) { throw 'UI Automation test editor is missing.' }
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'published-helper\voice-target.exe') native\bin\win32-x64\voice-target.exe -Force -ErrorAction Stop
           npx --no-install playwright test tests/e2e/windows-dictation.spec.ts --grep "Windows published native helper"
           exit $LASTEXITCODE
