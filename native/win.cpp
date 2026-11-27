@@ -249,7 +249,8 @@ bool byteFormat(UINT format) {
     const std::wstring_view key(name);
     return key == L"HTML Format" || key == L"Rich Text Format" || key == L"Rich Text Format Without Objects" ||
            key == L"PNG" || key == L"JFIF" || key == L"GIF" || key == L"UniformResourceLocator" ||
-           key == L"UniformResourceLocatorW" || key == L"CanIncludeInClipboardHistory" ||
+           key == L"UniformResourceLocatorW" || key == L"Chromium internal source URL" ||
+           key == L"CanIncludeInClipboardHistory" ||
            key == L"CanUploadToCloudClipboard" || key == L"ExcludeClipboardContentFromMonitorProcessing";
 }
 
@@ -320,27 +321,7 @@ class Clipboard {
         return success;
     }
 
-public:
-    explicit Clipboard(HWND owner) : owner(owner) {}
-    ~Clipboard() { (void)restore(); }
-
-    bool restore() {
-        if (!staged) return restored;
-        for (int retry = 0; retry < 40 && GetClipboardSequenceNumber() == *staged; ++retry) {
-            const ClipboardLock lock(owner);
-            if (lock.open) {
-                if (GetClipboardSequenceNumber() == *staged) restored = restoreLocked();
-                staged.reset();
-                return restored;
-            }
-            std::this_thread::sleep_for(25ms);
-        }
-        restored = GetClipboardSequenceNumber() != *staged;
-        staged.reset();
-        return restored;
-    }
-
-    bool stage(const std::wstring& text) {
+    bool stageLocked(const std::wstring& text) {
         const ClipboardLock lock(owner);
         if (!lock.open) return false;
         const auto initial = GetClipboardSequenceNumber();
@@ -365,11 +346,41 @@ public:
             restored = restoreLocked();
             return false;
         }
-        staged = GetClipboardSequenceNumber();
         return true;
     }
 
-    bool owned() const { return staged && GetClipboardSequenceNumber() == *staged; }
+public:
+    explicit Clipboard(HWND owner) : owner(owner) {}
+    ~Clipboard() { (void)restore(); }
+
+    bool stage(const std::wstring& text) {
+        if (!stageLocked(text)) return false;
+        // Windows may update the sequence during CloseClipboard as it publishes text formats.
+        const auto sequence = GetClipboardSequenceNumber();
+        if (GetClipboardOwner() != owner) return false;
+        staged = sequence;
+        return owned();
+    }
+
+    bool owned() const {
+        return staged && GetClipboardOwner() == owner && GetClipboardSequenceNumber() == *staged;
+    }
+
+    bool restore() {
+        if (!staged) return restored;
+        for (int retry = 0; retry < 40 && owned(); ++retry) {
+            const ClipboardLock lock(owner);
+            if (lock.open) {
+                if (owned()) restored = restoreLocked();
+                staged.reset();
+                return restored;
+            }
+            std::this_thread::sleep_for(25ms);
+        }
+        restored = !owned();
+        staged.reset();
+        return restored;
+    }
 };
 
 struct Response {

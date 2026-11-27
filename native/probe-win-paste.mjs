@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 
-const [editorExe, helperExe] = process.argv.slice(2)
+const [editorExe, helperExe, expectation] = process.argv.slice(2)
 assert.equal(process.platform, 'win32', 'The paste probe requires an interactive Windows desktop')
 assert.ok(editorExe && helperExe, 'Usage: node native/probe-win-paste.mjs <editor.exe> <voice-target.exe>')
 
@@ -90,6 +90,7 @@ const [first, chrome, last] = results
 const baselinePassed = [first, last].every(row => row.snapshot.ok && row.paste?.ok && row.inserted && row.after.original)
 if (baselinePassed && chrome.snapshot.ok && chrome.paste?.reason === 'clipboard' &&
     chrome.after.text === originalText && chrome.after.original && chrome.after.sourceUrl) {
+  assert.notEqual(expectation, '--expect-fixed', 'The Chromium paste failure still occurs')
   console.log('REPRODUCED: Windows accepted the same editor and pasted with plain text, but declined with Chromium source URL metadata.')
 } else if (baselinePassed && chrome.snapshot.ok && chrome.paste?.ok && chrome.inserted && chrome.after.original && chrome.after.sourceUrl) {
   console.log('NOT REPRODUCED: Both conditions inserted text and preserved the original clipboard.')

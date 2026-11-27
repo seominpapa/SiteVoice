@@ -1,4 +1,4 @@
-name: Reproduce SiteVoice 0.2.11 Windows paste
+name: Verify Windows paste clipboard fix
 
 on:
   push:
@@ -60,6 +60,10 @@ jobs:
           cl /nologo /std:c++17 /EHsc /W4 native\probe-win-paste-editor.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-editor.exe" user32.lib advapi32.lib
           if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /EHsc /utf-8 /DUNICODE /D_UNICODE "%RUNNER_TEMP%\sitevoice-tag\native\probe-win-clipboard.cpp" /Fe:"%RUNNER_TEMP%\sitevoice-paste-clipboard.exe" user32.lib gdi32.lib ole32.lib oleaut32.lib uiautomationcore.lib crypt32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /utf-8 /DUNICODE /D_UNICODE native\probe-win-clipboard.cpp /Fe:"%RUNNER_TEMP%\sitevoice-paste-clipboard-fixed.exe" user32.lib gdi32.lib ole32.lib oleaut32.lib uiautomationcore.lib crypt32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+          node native\build.mjs x64
           "@ | Set-Content -LiteralPath $build -Encoding ascii
           & $build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -67,12 +71,21 @@ jobs:
         id: clipboard-stage
         shell: pwsh
         run: |
-          & (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-clipboard.exe')
+          & (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-clipboard.exe') --expect-baseline
           exit $LASTEXITCODE
-      - name: Compare plain text with Chromium source metadata in a separate editor process
+      - name: Verify fixed clipboard behavior and preservation
+        shell: pwsh
+        run: |
+          & (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-clipboard-fixed.exe')
+          exit $LASTEXITCODE
+      - name: Verify actual text insertion through the fixed helper
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: pwsh
         run: |
-          node native/probe-win-paste.mjs (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-editor.exe') $env:SITEVOICE_HELPER
-          exit $LASTEXITCODE
+          $env:SITEVOICE_PROBE_STATUS = Join-Path $env:RUNNER_TEMP 'sitevoice-editor-status.log'
+          $helper = (Resolve-Path 'native/bin/win32-x64/voice-target.exe').Path
+          node native/probe-win-paste.mjs (Join-Path $env:RUNNER_TEMP 'sitevoice-paste-editor.exe') $helper --expect-fixed
+          $result = $LASTEXITCODE
+          if (Test-Path -LiteralPath $env:SITEVOICE_PROBE_STATUS) { Get-Content -LiteralPath $env:SITEVOICE_PROBE_STATUS }
+          exit $result

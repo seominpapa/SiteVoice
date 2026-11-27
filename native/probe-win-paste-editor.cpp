@@ -4,7 +4,9 @@
 #include <windows.h>
 
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -64,7 +66,13 @@ bool pipeForChild(DWORD which, HANDLE* result) {
     return DuplicateHandle(self, pipe, self, result, 0, TRUE, DUPLICATE_SAME_ACCESS) != FALSE;
 }
 
+void trace(std::string_view message, DWORD value = 0) {
+    const auto path = std::getenv("SITEVOICE_PROBE_STATUS");
+    if (path) std::ofstream(path, std::ios::app) << message << ": " << value << '\n';
+}
+
 int fail(std::string_view stage, DWORD error = 0) {
+    trace(stage, error);
     std::cerr << "Windows test editor could not start: " << stage << " (Win32 " << error << ")" << std::endl;
     std::cout << "{\"ready\":false,\"stage\":\"" << stage << '"';
     if (error) std::cout << ",\"win32Error\":" << error;
@@ -125,6 +133,7 @@ int startStandardChild(HANDLE token) {
     DWORD result = 1;
     if (WaitForSingleObject(child.value, INFINITE) != WAIT_OBJECT_0 || !GetExitCodeProcess(child.value, &result))
         return fail("wait-standard-child", GetLastError());
+    trace("standard-editor-child-exit", result);
     return result == 0 ? 0 : 1;
 }
 
@@ -249,6 +258,7 @@ void readCommands(DWORD thread) {
 }
 
 int main(int argc, char** argv) {
+    trace("start-editor", static_cast<DWORD>(argc));
     const bool child = argc == 3 && std::string_view(argv[2]) == childArg;
     if ((argc != 2 && !child) || std::string_view(argv[1]) != isolatedArg) return fail("isolated-desktop-required");
     ScopedHandle selfToken;
@@ -256,6 +266,7 @@ int main(int argc, char** argv) {
         return fail("query-token", GetLastError());
     const auto level = integrity(selfToken.value);
     if (!level) return fail("query-integrity", GetLastError());
+    trace("editor-integrity", *level);
     if (*level >= SECURITY_MANDATORY_HIGH_RID) {
         if (child) return fail("standard-child-is-elevated"); // Never recurse or create an elevated test editor.
         ScopedHandle originalToken, restrictedToken;
@@ -281,6 +292,7 @@ int main(int argc, char** argv) {
     MSG message{};
     PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
     std::thread reader(readCommands, GetCurrentThreadId());
+    trace("editor-ready");
     std::cout << "{\"ready\":true,\"integrity\":" << *level << '}' << std::endl;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (message.message != commandMessage || message.hwnd) {
