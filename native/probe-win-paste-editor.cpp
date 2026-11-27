@@ -3,7 +3,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -23,7 +22,6 @@ constexpr wchar_t sourceFormat[] = L"Chromium internal source URL";
 constexpr char sourceUrl[] = "https://example.test/";
 enum class Command : WPARAM { plain, chrome, read, close, invalid };
 constexpr char isolatedArg[] = "--isolated-clipboard";
-constexpr char childArg[] = "--private-standard-probe-child";
 
 struct ScopedHandle {
     HANDLE value = nullptr;
@@ -44,26 +42,12 @@ std::optional<DWORD> integrity(HANDLE token) {
     return *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
 }
 
-bool restrictToMedium(HANDLE originalToken, HANDLE* token) {
-    alignas(DWORD) BYTE admins[SECURITY_MAX_SID_SIZE]{};
-    DWORD adminsSize = sizeof(admins);
-    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admins, &adminsSize)) return false;
-    SID_AND_ATTRIBUTES denied{admins, 0};
-    if (!CreateRestrictedToken(originalToken, DISABLE_MAX_PRIVILEGE, 1, &denied, 0, nullptr, 0, nullptr, token))
-        return false;
-
+bool lowerFixtureIntegrity(HANDLE token) {
     alignas(DWORD) BYTE medium[SECURITY_MAX_SID_SIZE]{};
-    DWORD mediumSize = sizeof(medium);
-    if (!CreateWellKnownSid(WinMediumLabelSid, nullptr, medium, &mediumSize)) return false;
+    DWORD size = sizeof(medium);
+    if (!CreateWellKnownSid(WinMediumLabelSid, nullptr, medium, &size)) return false;
     TOKEN_MANDATORY_LABEL label{{medium, SE_GROUP_INTEGRITY}};
-    return SetTokenInformation(*token, TokenIntegrityLevel, &label, sizeof(label) + mediumSize) != FALSE;
-}
-
-bool pipeForChild(DWORD which, HANDLE* result) {
-    const auto pipe = GetStdHandle(which);
-    if (pipe == INVALID_HANDLE_VALUE || !pipe || GetFileType(pipe) != FILE_TYPE_PIPE) return false;
-    const auto self = GetCurrentProcess();
-    return DuplicateHandle(self, pipe, self, result, 0, TRUE, DUPLICATE_SAME_ACCESS) != FALSE;
+    return SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof(label) + size) != FALSE;
 }
 
 void trace(std::string_view message, DWORD value = 0) {
@@ -78,63 +62,6 @@ int fail(std::string_view stage, DWORD error = 0) {
     if (error) std::cout << ",\"win32Error\":" << error;
     std::cout << '}' << std::endl;
     return 1;
-}
-
-int startStandardChild(HANDLE token) {
-    ScopedHandle input, output, error;
-    if (!pipeForChild(STD_INPUT_HANDLE, &input.value) || !pipeForChild(STD_OUTPUT_HANDLE, &output.value) ||
-            !pipeForChild(STD_ERROR_HANDLE, &error.value)) return fail("standard-child-pipes");
-    std::array<HANDLE, 3> handles{input.value, output.value, error.value};
-    SIZE_T attributeSize = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeSize);
-    if (!attributeSize) return fail("child-attributes-size", GetLastError());
-    std::vector<BYTE> attributes(attributeSize);
-    const auto list = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
-    if (!InitializeProcThreadAttributeList(list, 1, 0, &attributeSize)) return fail("child-attributes", GetLastError());
-    struct DeleteAttributes {
-        PPROC_THREAD_ATTRIBUTE_LIST value;
-        ~DeleteAttributes() { DeleteProcThreadAttributeList(value); }
-    } deleteAttributes{list};
-    if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.data(),
-                                  sizeof(HANDLE) * handles.size(), nullptr, nullptr))
-        return fail("child-pipe-list", GetLastError());
-
-    std::wstring modulePath(32768, L'\0');
-    const auto capacity = static_cast<DWORD>(modulePath.size());
-    const auto length = GetModuleFileNameW(nullptr, modulePath.data(), capacity);
-    if (!length || length >= capacity) return fail("fixture-module-path", GetLastError());
-    modulePath.resize(length);
-    std::wstring command = L"\"" + modulePath + L"\" --isolated-clipboard --private-standard-probe-child";
-    wchar_t desktop[] = L"winsta0\\default";
-    STARTUPINFOEXW startup{};
-    startup.StartupInfo.cb = sizeof(startup);
-    startup.StartupInfo.lpDesktop = desktop;
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = input.value;
-    startup.StartupInfo.hStdOutput = output.value;
-    startup.StartupInfo.hStdError = error.value;
-    startup.lpAttributeList = list;
-    PROCESS_INFORMATION process{};
-    constexpr DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED;
-    if (!CreateProcessAsUserW(token, modulePath.c_str(), command.data(), nullptr, nullptr, TRUE, flags,
-                             nullptr, nullptr, &startup.StartupInfo, &process))
-        return fail("start-standard-child", GetLastError());
-    ScopedHandle child(process.hProcess), thread(process.hThread);
-    ScopedHandle job(CreateJobObjectW(nullptr, nullptr));
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (job.value && SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
-        AssignProcessToJobObject(job.value, child.value); // Stdin EOF still applies if the runner's job blocks this.
-    if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) {
-        const auto cause = GetLastError();
-        TerminateProcess(child.value, 1);
-        return fail("resume-standard-child", cause);
-    }
-    DWORD result = 1;
-    if (WaitForSingleObject(child.value, INFINITE) != WAIT_OBJECT_0 || !GetExitCodeProcess(child.value, &result))
-        return fail("wait-standard-child", GetLastError());
-    trace("standard-editor-child-exit", result);
-    return result == 0 ? 0 : 1;
 }
 
 bool active(HWND window, HWND editor) {
@@ -259,24 +186,26 @@ void readCommands(DWORD thread) {
 
 int main(int argc, char** argv) {
     trace("start-editor", static_cast<DWORD>(argc));
-    const bool child = argc == 3 && std::string_view(argv[2]) == childArg;
-    if ((argc != 2 && !child) || std::string_view(argv[1]) != isolatedArg) return fail("isolated-desktop-required");
+    if (argc != 2 || std::string_view(argv[1]) != isolatedArg) return fail("isolated-desktop-required");
     ScopedHandle selfToken;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &selfToken.value))
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &selfToken.value))
         return fail("query-token", GetLastError());
-    const auto level = integrity(selfToken.value);
+    auto level = integrity(selfToken.value);
     if (!level) return fail("query-integrity", GetLastError());
-    trace("editor-integrity", *level);
+    trace("original-editor-integrity", *level);
+    // Lower only the test editor's integrity; leave the parent and actual SiteVoice helper unchanged.
     if (*level >= SECURITY_MANDATORY_HIGH_RID) {
-        if (child) return fail("standard-child-is-elevated"); // Never recurse or create an elevated test editor.
-        ScopedHandle originalToken, restrictedToken;
-        constexpr DWORD access = TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT;
-        if (!OpenProcessToken(GetCurrentProcess(), access, &originalToken.value) ||
-                !restrictToMedium(originalToken.value, &restrictedToken.value))
-            return fail("restrict-fixture-token", GetLastError());
-        return startStandardChild(restrictedToken.value);
+        if (!lowerFixtureIntegrity(selfToken.value)) return fail("lower-fixture-integrity", GetLastError());
+        level = integrity(selfToken.value);
+        if (!level || *level >= SECURITY_MANDATORY_HIGH_RID) return fail("fixture-still-high");
     }
-    if (child && *level > SECURITY_MANDATORY_MEDIUM_RID) return fail("standard-child-above-medium");
+    trace("editor-integrity", *level);
+    USEROBJECTFLAGS stationFlags{};
+    if (!GetUserObjectInformationW(GetProcessWindowStation(), UOI_FLAGS, &stationFlags, sizeof(stationFlags), nullptr))
+        return fail("window-station-flags", GetLastError());
+    if (!(stationFlags.dwFlags & WSF_VISIBLE)) return fail("window-station-noninteractive");
+    if (const auto desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS)) CloseDesktop(desktop);
+    else trace("open-input-desktop", GetLastError());
     const auto instance = GetModuleHandleW(nullptr);
     const auto window = CreateWindowExW(0, L"STATIC", L"SiteVoice Windows paste probe", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 440, 165, nullptr, nullptr, instance, nullptr);
