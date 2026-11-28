@@ -13,6 +13,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
           $oldVersion = '0.2.13'
           $newVersion = '0.2.14'
           $repo = 'seominpapa/SiteVoice'
@@ -35,42 +36,92 @@ jobs:
           if (Get-Process -Name SiteVoice -ErrorAction SilentlyContinue) { throw 'SiteVoice already running.' }
           Add-Type -AssemblyName UIAutomationClient
           Add-Type -AssemblyName UIAutomationTypes
-          $root = [System.Windows.Automation.AutomationElement]::RootElement
+          Add-Type @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class SiteVoiceDesktop {
+            private delegate bool EnumProc(IntPtr hwnd, IntPtr state);
+            [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr state);
+            [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder name, int length);
+            [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+            public static IntPtr[] Windows(int expected, string title) {
+              var windows = new List<IntPtr>();
+              EnumWindows((window, state) => {
+                int pid;
+                GetWindowThreadProcessId(window, out pid);
+                if (pid != expected || !IsWindowVisible(window)) return true;
+                var name = new StringBuilder(192);
+                GetWindowText(window, name, name.Capacity);
+                if (name.ToString() == title) windows.Add(window);
+                return true;
+              }, IntPtr.Zero);
+              return windows.ToArray();
+            }
+          }
+          '@
           $any = [System.Windows.Automation.Condition]::TrueCondition
           $buttonLabel = ('{"text":"\uc5c5\ub370\uc774\ud2b8 \uc124\uce58"}' | ConvertFrom-Json).text
           $title = ('{"text":"SiteVoice \uc5c5\ub370\uc774\ud2b8"}' | ConvertFrom-Json).text
-          $start = Start-Process -FilePath $exe -PassThru
-          $processCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$start.Id)
-          $deadline = (Get-Date).AddSeconds(50)
+          $settings = ('{"text":"\ud658\uacbd \uc124\uc815"}' | ConvertFrom-Json).text
+          $check = ('{"text":"\uc5c5\ub370\uc774\ud2b8 \ud655\uc778"}' | ConvertFrom-Json).text
+          $hasLatest = Invoke-WebRequest -UseBasicParsing 'https://api.github.com/repos/seominpapa/SiteVoice/releases?per_page=100'
+          Write-Output "Anonymous feed is HTTP $($hasLatest.StatusCode); rate remaining $($hasLatest.Headers['X-RateLimit-Remaining'])."
+          $marker = Join-Path $dest 'resources\build\windows-update.channel'
+          if (!(Test-Path $marker) -or (Get-Content $marker -Raw).Trim() -ne 'sitevoice-win-x64-v1') {
+            throw 'The public previous app does not have the updater channel.'
+          }
+          $start = Start-Process -FilePath $exe -ArgumentList '--force-renderer-accessibility' -PassThru
+          function Get-Elements($window) {
+            $element = [System.Windows.Automation.AutomationElement]::FromHandle($window)
+            $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, $any)
+          }
+          function Invoke-NamedButton($elements, [string]$label) {
+            foreach ($element in $elements) {
+              if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
+                  $element.Current.Name.Replace('&', '') -ne $label) { continue }
+              $invoke = $null
+              if (!$element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { continue }
+              $invoke.Invoke()
+              return $true
+            }
+            return $false
+          }
+          $deadline = (Get-Date).AddSeconds(75)
+          $manualAt = (Get-Date).AddSeconds(18)
           $confirmed = $false
+          $openedSettings = $false
+          $manual = $false
           $lastSeen = @()
           do {
-            foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, $processCondition)) {
+            foreach ($window in [SiteVoiceDesktop]::Windows($start.Id, $title)) {
               try {
-                if ($window.Current.Name -ne $title) {
-                  $lastSeen = @($lastSeen + "window: $($window.Current.Name) / $($window.Current.ClassName)" | Select-Object -Unique -First 20)
-                  continue
-                }
-                $elements = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $any)
+                $elements = @(Get-Elements $window)
                 $names = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
-                $lastSeen = @($names | Select-Object -First 30)
                 if (!($names | Where-Object { $_.Contains($newVersion) })) { continue }
-                foreach ($element in $elements) {
-                  if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
-                      $element.Current.Name.Replace('&', '') -ne $buttonLabel) { continue }
-                  $invoke = $null
-                  if (!$element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { continue }
-                  Write-Output "Observed the startup update prompt for $newVersion in the $oldVersion app."
-                  $invoke.Invoke()
+                if (Invoke-NamedButton $elements $buttonLabel) {
+                  $method = if ($manual) { 'manual check' } else { 'startup check' }
+                  Write-Output "Observed the $method prompt for $newVersion in the $oldVersion app and approved it."
                   $confirmed = $true
                   break
                 }
               } catch [System.Windows.Automation.ElementNotAvailableException] {}
-              if ($confirmed) { break }
             }
-            if (!$confirmed) { Start-Sleep -Milliseconds 300 }
+            if (!$confirmed -and (Get-Date) -gt $manualAt) {
+              foreach ($window in [SiteVoiceDesktop]::Windows($start.Id, 'SiteVoice')) {
+                try {
+                  $elements = @(Get-Elements $window)
+                  $lastSeen = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ } | Select-Object -First 25)
+                  if (!$openedSettings) { $openedSettings = Invoke-NamedButton $elements $settings }
+                  elseif (!$manual) { $manual = Invoke-NamedButton $elements $check }
+                } catch [System.Windows.Automation.ElementNotAvailableException] {}
+              }
+            }
+            if (!$confirmed) { Start-Sleep -Milliseconds 500 }
           } while (!$confirmed -and (Get-Date) -lt $deadline -and !$start.HasExited)
-          if (!$confirmed) { throw "Could not confirm the real update prompt. Observed UI: $($lastSeen -join '; ')" }
+          if (!$confirmed) { throw "Could not confirm the real update prompt. Navigation: $openedSettings, manual check: $manual. Observed UI: $($lastSeen -join '; ')" }
           $deadline = (Get-Date).AddSeconds(210)
           do {
             $live = @(Get-Process -Name SiteVoice -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe -and $_.Id -ne $start.Id -and $_.MainWindowHandle -ne [IntPtr]::Zero })
