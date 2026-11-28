@@ -129,6 +129,21 @@ test('a unit change or paste refusal returns a copy result', async () => {
   assert.equal(refusal.flow.getState().cleaned, cleaned)
 })
 
+test('pastes the last clearly corrected amount and shows copy for an altered final amount', async () => {
+  for (const [text, phase] of [['철근 15개 주문해 줘.', 'completed'], ['철근 51개 주문해 줘.', 'copy']] as const) {
+    const pasted: string[] = []
+    const { flow } = fixture({
+      transcribe: async () => transcript('철근 50개, 아니 15개 주문해 줘.'),
+      clean: async () => text,
+      paste: async value => { pasted.push(value); return { ok: true } },
+    })
+    await flow.submitAudio(startAndStop(flow), audio)
+    assert.equal(flow.getState().phase, phase)
+    assert.deepEqual(pasted, phase === 'completed' ? [text] : [])
+    assert.equal(flow.getState().cleaned, text)
+  }
+})
+
 test('dispatch cannot be cancelled once it begins; native errors keep the result', async () => {
   const paste = Promise.withResolvers<{ ok: boolean }>()
   const entered = Promise.withResolvers<void>()

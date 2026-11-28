@@ -73,12 +73,12 @@ test('records with fake device, offers copy fallback, and keeps results after re
       globalThis.fetch = async input => {
         const path = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).pathname
         const second = Reflect.get(globalThis, 'voiceInputMockSecondRecording')
-        if (second && path.endsWith('/audio/transcriptions')) return Response.json({ text: '안전 점검을, 안전 점검을 먼저 진행해요.' })
+        if (second && path.endsWith('/audio/transcriptions')) return Response.json({ text: '철근 50개, 아니 15개 주문해 줘.' })
         if (path.endsWith('/audio/transcriptions')) return Response.json({ text: '회의는 화요일, 아니 수요일이고 도면 검토가 필요해요.' })
         if (path.endsWith('/responses')) return Response.json({
           status: 'completed',
           output: [{ type: 'message', role: 'assistant', status: 'completed', content: [
-            { type: 'output_text', text: JSON.stringify({ text: second ? '안전 점검을 먼저 진행해요.' : '회의는 수요일이고 도면 검토가 필요해요.' }) }
+            { type: 'output_text', text: JSON.stringify({ text: second ? '철근 51개 주문해 줘.' : '회의는 수요일이고 도면 검토가 필요해요.' }) }
           ] }]
         })
         throw new Error('Unexpected remote request blocked by the test')
@@ -132,8 +132,10 @@ test('records with fake device, offers copy fallback, and keeps results after re
     await expect(overlay.getByRole('button', { name: '녹음 종료' })).toBeEnabled()
     await overlay.waitForTimeout(1100)
     await overlay.getByRole('button', { name: '녹음 종료' }).click()
+    await expect(overlay.getByRole('status')).toHaveText('숫자나 단위가 달라졌을 수 있어요. 확인한 뒤 복사해 주세요.')
+    await expect(overlay.getByRole('button', { name: '복사하기', exact: true })).toBeVisible()
     await expect.poll(async () => (await page.evaluate(() => window.voice.get())).history.map(entry => entry.text)).toEqual([
-      '안전 점검을 먼저 진행해요.', '회의는 수요일이고 도면 검토가 필요해요.'
+      '철근 51개 주문해 줘.', '회의는 수요일이고 도면 검토가 필요해요.'
     ])
     const showHistory = () => page.getByRole('button', { name: '결과', exact: true }).click()
     const results = () => page.getByRole('list', { name: '받아쓰기 기록' }).getByRole('listitem')
@@ -149,7 +151,7 @@ test('records with fake device, offers copy fallback, and keeps results after re
     })
     await showHistory()
     await expect(results()).toHaveCount(2)
-    await expect(results().first().getByText('안전 점검을 먼저 진행해요.', { exact: true })).toBeVisible()
+    await expect(results().first().getByText('철근 51개 주문해 줘.', { exact: true })).toBeVisible()
     await expect(results().last().getByText('회의는 수요일이고 도면 검토가 필요해요.', { exact: true })).toBeVisible()
     await expect(results().last().locator('time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/)
     await expect(page.getByText('회의는 화요일, 아니 수요일이고 도면 검토가 필요해요.', { exact: true })).toHaveCount(0)

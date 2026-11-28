@@ -1,9 +1,11 @@
+import { amountField, correctionReference, directiveChanged, negativeClauses } from './self-correction.ts'
+
 const units = new Map(Object.entries({
   제곱미터: 'm²', 'm²': 'm²', m2: 'm²', 세제곱미터: 'm³', 'm³': 'm³', m3: 'm³',
   킬로미터: 'km', km: 'km', 센티미터: 'cm', cm: 'cm', 밀리미터: 'mm', mm: 'mm', 미터: 'm', m: 'm',
   킬로그램: 'kg', kg: 'kg', 그램: 'g', g: 'g', 밀리리터: 'ml', ml: 'ml', 리터: 'l', l: 'l',
   퍼센트: '%', '%': '%', 시: '시', 분: '분', 초: '초', 년: '년', 월: '월', 일: '일',
-  시간: '시간', 달: '달', 주: '주', 번: '번', 개: '개', 명: '명', 가지: '가지',
+  시간: '시간', 달: '달', 주: '주', 번: '번', 개: '개', 명: '명', 가지: '가지', 장: '장', 권: '권', 건: '건',
   '억 원': '억원', '만 원': '만원', '천 원': '천원', '백 원': '백원',
   '억원': '억원', '만원': '만원', '천원': '천원', '백원': '백원', 원: '원', 달러: '달러',
   억: '억', 만: '만', 천: '천', 백: '백', 톤: 't', t: 't',
@@ -16,7 +18,7 @@ const sino = '[영공일이삼사오육칠팔구]'
 const spokenNumber = [...digit.keys()].sort((a, b) => b.length - a.length).join('|')
 const written = new RegExp(`(?<![a-z\\d])([+−-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?)(?:[ \\t]*(${unitPattern})(?![a-z0-9]))?`, 'gi')
 const spoken = new RegExp(`(?<![\\p{L}\\p{N}])(${sino}\\s*점\\s*${sino}(?:\\s*${sino})*|${spokenNumber})[ \\t]*(${unitPattern})(?![a-z0-9])`, 'giu')
-const negative = /(?:하지[ \t]*마|지[ \t]+마(?=$|[\s,.!?]|세요|십시오|라|요|시[고길면기])|(?:하면|해선|해서는)[ \t]*안|않(?:았|는|고|다|습|아|을|게)|못[ \t]+|안[ \t]+|금지|없(?:다|습|어요|어야|을)|\b(?:no|not|never|without)\b|n['’]t\b)/iu
+const negative = /(?:지[ \t]*마(?=$|[\s,.!?]|세요|십시오|라|요|시[고길면기])|(?:하면|해선|해서는)[ \t]*안|않(?:았|는|고|다|습|아|을|게|겠)|못[ \t]+|안[ \t]+|금지|없(?:다|습|어요|어야|을)|\b(?:no|not|never|without)\b|n['’]t\b)/iu
 const numberedItem = /^([1-9][0-9]*)\.[ \t]+(\S.*)$/u
 const ordinal = /(^|[.!?\r\n])([ \t]*)(첫째|둘째|셋째|넷째|다섯째|여섯째|일곱째|여덟째|아홉째|열째|(?:첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)[ \t]+번째)[ \t]*[,:][ \t]*/gu
 const ordinals = [['첫째', '첫'], ['둘째', '두'], ['셋째', '세'], ['넷째', '네'],
@@ -51,25 +53,55 @@ function stripSpokenList(raw: string, expected: number) {
     : raw
 }
 
-function quantity(value: string, unit: string = '') {
+function quantity(value: string, unit: string) {
   const normalized = value.replaceAll(',', '').replace('−', '-')
     .replace(/^\+/, '').replace(/^(-?)0+(?=\d)/, '$1')
     .replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1')
-  return `${normalized}:${units.get(unit.toLowerCase()) ?? ''}`
+  return { value: normalized, unit: units.get(unit.toLowerCase()) ?? '' }
 }
 
-function quantities(input: string) {
-  const text = input.replace(/[\uff00-\uffef]/g, char => char.normalize('NFKC'))
-  const output = [...text.matchAll(written)].map(match => quantity(match[1]!, match[2]))
-  for (const [phrase, value, unit] of text.matchAll(spoken)) {
+const normalizeWidth = (text: string) => text.replace(/[\uff00-\uffef]/g, char => char.normalize('NFKC'))
+
+function amounts(text: string) {
+  const found = (match: RegExpMatchArray, value: string, unit: string) => ({
+    start: match.index!, end: match.index! + match[0].length, ...quantity(value, unit),
+  })
+  const output = [...text.matchAll(written)].map(match => found(match, match[1]!, match[2] ?? ''))
+  for (const match of text.matchAll(spoken)) {
+    const [phrase, value, unit] = match
     if (phrase === '한번') continue
     const [whole, decimal] = value!.split('점').map(part => part.trim())
     const number = digit.get(whole!)
     if (!number) continue
     const fraction = decimal?.replaceAll(/\s/g, '').split('').map(char => digit.get(char)).join('')
-    output.push(quantity(fraction ? `${number}.${fraction}` : number, unit))
+    output.push(found(match, fraction ? `${number}.${fraction}` : number, unit!))
   }
-  return [...new Set(output)].sort().join('|')
+  return output.sort((a, b) => a.start - b.start)
+}
+
+const amountKey = ({ value, unit }: { value: string; unit: string }) => `${value}:${unit}`
+
+function quantitiesChanged(source: string, output: string, corrected: boolean, fields: ReadonlySet<string>) {
+  const from = amounts(source), to = amounts(output)
+  const keys = (list: typeof from) => [...new Set(list.map(amountKey))].sort().join('|')
+  if (!corrected) return keys(from) !== keys(to)
+  // A correction removes a particular occurrence, so a set would miss
+  // swapped values or the loss of another occurrence with the same amount.
+  return from.length !== to.length || from.some((amount, index) => {
+    const next = to[index]!
+    const field = amountField(source, amount)
+    return amountKey(amount) !== amountKey(next) || (fields.has(field) && field !== amountField(output, next))
+  })
+}
+
+function normalizeNegativeAmounts(clause: string) {
+  let cursor = 0
+  const parts = amounts(clause).map(amount => {
+    const part = clause.slice(cursor, amount.start) + amountKey(amount)
+    cursor = amount.end
+    return part
+  })
+  return parts.join('') + clause.slice(cursor)
 }
 
 export function meaningConcern(raw: string, cleaned: string) {
@@ -80,7 +112,17 @@ export function meaningConcern(raw: string, cleaned: string) {
   const sourceText = formatsMatch ? source.text
     : !source.sizes.length && output.sizes.length === 1 ? stripSpokenList(raw, output.sizes[0]!) : raw
   const outputText = formatsMatch || !source.sizes.length ? output.text : cleaned
-  if (quantities(sourceText) !== quantities(outputText)) return '숫자나 단위가 달라졌을 수 있어요. 확인한 뒤 복사해 주세요.'
-  if (negative.test(raw) !== negative.test(cleaned)) return '부정 표현이 달라졌을 수 있어요. 확인한 뒤 복사해 주세요.'
+  const negated = (text: string) => negative.test(text)
+  const reference = correctionReference(normalizeWidth(sourceText), amounts, negated)
+  const formatted = normalizeWidth(outputText)
+  if (quantitiesChanged(reference.text, formatted, reference.correctedAmount, reference.correctedFields)) {
+    return '숫자나 단위가 달라졌을 수 있어요. 확인한 뒤 복사해 주세요.'
+  }
+  const negativeIn = (text: string) => negativeClauses(text, negated, normalizeNegativeAmounts)
+  if (negated(reference.text) !== negated(formatted) ||
+      ((reference.sensitiveNegation || reference.correctedAmount) && negativeIn(reference.text) !== negativeIn(formatted)) ||
+      directiveChanged(reference.text, formatted, reference.correctedDirectives)) {
+    return '부정 표현이 달라졌을 수 있어요. 확인한 뒤 복사해 주세요.'
+  }
   return undefined
 }
