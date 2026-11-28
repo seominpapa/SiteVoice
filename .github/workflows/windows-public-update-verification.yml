@@ -1,0 +1,85 @@
+name: Verify published Windows update
+on:
+  push:
+    branches: [codex/sitevoice-windows-update-v0214]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - name: Run the public updater in the installed 0.2.13 app
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $oldVersion = '0.2.13'
+          $newVersion = '0.2.14'
+          $repo = 'seominpapa/SiteVoice'
+          $dest = Join-Path $env:RUNNER_TEMP 'SiteVoicePublicUpdate'
+          $exe = Join-Path $dest 'SiteVoice.exe'
+          $previous = Join-Path $env:RUNNER_TEMP "SiteVoice-$oldVersion-win-x64.exe"
+          $profile = Join-Path $env:APPDATA 'SiteVoice'
+          if (Test-Path -LiteralPath $profile) { throw 'The runner already has SiteVoice user data.' }
+          Invoke-WebRequest -UseBasicParsing "https://github.com/$repo/releases/download/v$oldVersion/SiteVoice-$oldVersion-win-x64.exe" -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '1e621e14d10b599bc458b77f271cfe498b9f433bb5f01a33358d455c8dabcd04') { throw 'Unexpected previous installer.' }
+          $setup = Start-Process -FilePath $previous -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Installing the previous app failed.' }
+
+          function Has-AppVersion([string]$version) {
+            if (!(Test-Path -LiteralPath $exe)) { return $false }
+            $escaped = [regex]::Escape($version)
+            (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -match "^$escaped(?:\.0)?$"
+          }
+          if (!(Has-AppVersion $oldVersion)) { throw 'Wrong starting app version.' }
+          if (Get-Process -Name SiteVoice -ErrorAction SilentlyContinue) { throw 'SiteVoice already running.' }
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $root = [System.Windows.Automation.AutomationElement]::RootElement
+          $any = [System.Windows.Automation.Condition]::TrueCondition
+          $buttonLabel = ('{"text":"\uc5c5\ub370\uc774\ud2b8 \uc124\uce58"}' | ConvertFrom-Json).text
+          $title = ('{"text":"SiteVoice \uc5c5\ub370\uc774\ud2b8"}' | ConvertFrom-Json).text
+          $start = Start-Process -FilePath $exe -PassThru
+          $processCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$start.Id)
+          $deadline = (Get-Date).AddSeconds(50)
+          $confirmed = $false
+          $lastSeen = @()
+          do {
+            foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, $processCondition)) {
+              try {
+                if ($window.Current.Name -ne $title) {
+                  $lastSeen = @($lastSeen + "window: $($window.Current.Name) / $($window.Current.ClassName)" | Select-Object -Unique -First 20)
+                  continue
+                }
+                $elements = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $any)
+                $names = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
+                $lastSeen = @($names | Select-Object -First 30)
+                if (!($names | Where-Object { $_.Contains($newVersion) })) { continue }
+                foreach ($element in $elements) {
+                  if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
+                      $element.Current.Name.Replace('&', '') -ne $buttonLabel) { continue }
+                  $invoke = $null
+                  if (!$element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { continue }
+                  Write-Output "Observed the startup update prompt for $newVersion in the $oldVersion app."
+                  $invoke.Invoke()
+                  $confirmed = $true
+                  break
+                }
+              } catch [System.Windows.Automation.ElementNotAvailableException] {}
+              if ($confirmed) { break }
+            }
+            if (!$confirmed) { Start-Sleep -Milliseconds 300 }
+          } while (!$confirmed -and (Get-Date) -lt $deadline -and !$start.HasExited)
+          if (!$confirmed) { throw "Could not confirm the real update prompt. Observed UI: $($lastSeen -join '; ')" }
+          $deadline = (Get-Date).AddSeconds(210)
+          do {
+            $live = @(Get-Process -Name SiteVoice -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe -and $_.Id -ne $start.Id -and $_.MainWindowHandle -ne [IntPtr]::Zero })
+            if ($start.HasExited -and $live.Count -and (Has-AppVersion $newVersion)) {
+              Start-Sleep -Seconds 3
+              if (@($live | Where-Object { !(Get-Process -Id $_.Id -ErrorAction SilentlyContinue) }).Count -eq $live.Count) { continue }
+              Write-Output "The installed app accepted the public update, replaced $oldVersion with $newVersion, and relaunched."
+              exit 0
+            }
+            Start-Sleep -Seconds 1
+          } while ((Get-Date) -lt $deadline)
+          throw 'The verified update did not relaunch the new installed version.'
