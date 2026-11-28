@@ -75,6 +75,7 @@ await build({
     artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
     files: ['dist/**/*', 'package.json'],
     extraResources: [
+      { from: 'LICENSE', to: 'LICENSE' },
       { from: 'native/bin/' + process.platform + '-' + arch, to: 'targets/' + process.platform + '-' + arch, filter: ['voice-target', 'voice-target.exe'] },
       { from: 'build', to: 'build', filter: platform === 'win' ? ['tray*.png', 'windows-update.channel'] : ['tray*.png'] }
     ],

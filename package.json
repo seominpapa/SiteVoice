@@ -5,6 +5,7 @@
   "private": true,
   "description": "개인용 한국어 음성 입력",
   "author": "SiteVoice",
+  "license": "MIT",
   "type": "module",
   "main": "dist/app/main/index.js",
   "engines": {
