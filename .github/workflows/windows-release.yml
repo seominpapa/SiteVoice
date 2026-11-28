@@ -106,9 +106,9 @@ jobs:
         run: |
           $installer = Get-Item -LiteralPath $env:SITEVOICE_INSTALLER
           $dest = Join-Path $env:RUNNER_TEMP 'SiteVoiceSmoke'
-          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.12-win-x64.exe'
-          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.12/SiteVoice-0.2.12-win-x64.exe' -OutFile $previous
-          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '307f9584db60f74c74ce07789073135dfca04d0a4b7dae9f82e2e1660f292cc2') {
+          $previous = Join-Path $env:RUNNER_TEMP 'SiteVoice-0.2.13-win-x64.exe'
+          Invoke-WebRequest 'https://github.com/seominpapa/SiteVoice/releases/download/v0.2.13/SiteVoice-0.2.13-win-x64.exe' -OutFile $previous
+          if ((Get-FileHash -LiteralPath $previous).Hash.ToLowerInvariant() -cne '1e621e14d10b599bc458b77f271cfe498b9f433bb5f01a33358d455c8dabcd04') {
             throw 'The previous installer does not match its published digest.'
           }
           $install = Start-Process -FilePath $previous -ArgumentList '/S', '/currentuser', "/D=$dest" -Wait -PassThru
