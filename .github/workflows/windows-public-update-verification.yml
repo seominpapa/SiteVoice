@@ -47,6 +47,14 @@ jobs:
             [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder name, int length);
             [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+            [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+            public static bool ClickButton(IntPtr hwnd, int expectedPid) {
+              int pid;
+              GetWindowThreadProcessId(hwnd, out pid);
+              UIntPtr result;
+              return hwnd != IntPtr.Zero && pid == expectedPid &&
+                SendMessageTimeout(hwnd, 0x00F5, UIntPtr.Zero, IntPtr.Zero, 2, 1500, out result) != IntPtr.Zero;
+            }
             public static IntPtr[] Windows(int expected, string title) {
               var windows = new List<IntPtr>();
               EnumWindows((window, state) => {
@@ -78,14 +86,18 @@ jobs:
             $element = [System.Windows.Automation.AutomationElement]::FromHandle($window)
             $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, $any)
           }
-          function Invoke-NamedButton($elements, [string]$label) {
+          function Invoke-NamedButton($elements, [string]$label, [switch]$nativeFallback) {
             foreach ($element in $elements) {
               if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
                   $element.Current.Name.Replace('&', '') -ne $label) { continue }
               $invoke = $null
-              if (!$element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { continue }
-              $invoke.Invoke()
-              return $true
+              if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                $invoke.Invoke()
+                return $true
+              }
+              if ($nativeFallback -and [SiteVoiceDesktop]::ClickButton([IntPtr]$element.Current.NativeWindowHandle, $start.Id)) {
+                return $true
+              }
             }
             return $false
           }
@@ -96,12 +108,13 @@ jobs:
           $manual = $false
           $lastSeen = @()
           do {
-            foreach ($window in [SiteVoiceDesktop]::Windows($start.Id, $title)) {
+            $windows = @([SiteVoiceDesktop]::Windows($start.Id, $title)) + @([SiteVoiceDesktop]::Windows($start.Id, 'SiteVoice'))
+            foreach ($window in $windows) {
               try {
                 $elements = @(Get-Elements $window)
                 $names = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ })
-                if (!($names | Where-Object { $_.Contains($newVersion) })) { continue }
-                if (Invoke-NamedButton $elements $buttonLabel) {
+                if (!($names | Where-Object { $_.Contains($newVersion) }) -or $title -notin $names) { continue }
+                if (Invoke-NamedButton $elements $buttonLabel -nativeFallback) {
                   $method = if ($manual) { 'manual check' } else { 'startup check' }
                   Write-Output "Observed the $method prompt for $newVersion in the $oldVersion app and approved it."
                   $confirmed = $true
